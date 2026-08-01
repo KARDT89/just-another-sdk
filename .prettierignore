@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.dist/
+.next/
+.source/
+coverage/
+pnpm-lock.yaml
+CHANGELOG.md
+.turbo/

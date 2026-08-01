@@ -1,0 +1,102 @@
+{
+  "name": "just-another-sdk",
+  "version": "0.0.0",
+  "description": "A TypeScript agent SDK with zero runtime dependencies. Define an agent, give it tools, run the loop, get a typed result.",
+  "keywords": [
+    "ai",
+    "agent",
+    "agents",
+    "llm",
+    "tool-calling",
+    "openrouter",
+    "openai",
+    "anthropic",
+    "typescript",
+    "sdk"
+  ],
+  "license": "MIT",
+  "author": "Tamal Sarkar",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KARDT89/sylo-sdk.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/KARDT89/sylo-sdk#readme",
+  "bugs": "https://github.com/KARDT89/sylo-sdk/issues",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19"
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./providers": {
+      "import": {
+        "types": "./dist/providers/index.d.ts",
+        "default": "./dist/providers/index.js"
+      },
+      "require": {
+        "types": "./dist/providers/index.d.cts",
+        "default": "./dist/providers/index.cjs"
+      }
+    },
+    "./testing": {
+      "import": {
+        "types": "./dist/testing/index.d.ts",
+        "default": "./dist/testing/index.js"
+      },
+      "require": {
+        "types": "./dist/testing/index.d.cts",
+        "default": "./dist/testing/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --config ../../eslint.config.mjs --max-warnings 0",
+    "check:exports": "attw --pack . --profile node16",
+    "clean": "rm -rf dist .turbo"
+  },
+  "peerDependencies": {
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "publint": "^0.3.22",
+    "tsdown": "^0.22.14",
+    "vitest": "^4.1.10",
+    "zod": "^4.4.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

@@ -1,0 +1,40 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+.dist/
+build/
+*.tsbuildinfo
+
+# next.js
+.next/
+out/
+.source/
+
+# test / coverage
+coverage/
+.vitest/
+
+# env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# editors / os
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# misc
+.vercel
+.turbo
+*.tgz

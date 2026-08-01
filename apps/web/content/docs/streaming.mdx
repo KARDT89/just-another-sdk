@@ -1,0 +1,65 @@
+---
+title: Streaming
+description: Token-by-token output and an async-iterator event API.
+---
+
+<Callout type="warn">
+  **Not shipped yet.** The event stream and the provider `stream()` hook already
+  exist in the runtime, so this is a surface to build on top of them rather than
+  a redesign. Track it in [the
+  repository](https://github.com/KARDT89/sylo-sdk/issues).
+</Callout>
+
+Today you observe a run through [`onEvent`](/docs/events), which fires
+`model.response` once per turn — after the model finishes that turn. Streaming
+adds `text.delta` events and an iterator you can drive a UI from.
+
+## Intended API
+
+```ts
+for await (const event of agent.stream('Write a short story about Paris.')) {
+  if (event.type === 'text.delta') process.stdout.write(event.delta)
+}
+```
+
+Awaiting the same call gives the final result, so the two styles compose:
+
+```ts
+const stream = agent.stream(prompt)
+
+for await (const event of stream) {
+  if (event.type === 'text.delta') ui.append(event.delta)
+}
+
+const result = await stream // RunResult, once the run completes
+```
+
+## Already in place
+
+- `text.delta` is a member of the [`AgentEvent`](/docs/events#event-reference)
+  union, so consumers written today will not need to change shape.
+- `ModelProvider.stream?()` is an optional method on the
+  [provider contract](/docs/providers#writing-a-provider). Providers that do not
+  implement it fall back to `generate()`, so streaming will never be a hard
+  requirement for a custom provider.
+
+## What has to be decided
+
+- Backpressure when a consumer reads slower than the model produces.
+- Whether tool execution interleaves with streamed text or pauses it.
+- Whether partial tool-call arguments are surfaced, or only completed calls.
+
+## Meanwhile
+
+For progress feedback without streaming, `onEvent` gives you per-turn and
+per-tool granularity, which is enough for a "thinking…" indicator and a live tool
+log:
+
+```ts
+await agent.run(prompt, {
+  onEvent: (event) => {
+    if (event.type === 'tool.start') ui.setStatus(`Calling ${event.toolName}…`)
+    if (event.type === 'model.request') ui.setStatus('Thinking…')
+  },
+})
+```

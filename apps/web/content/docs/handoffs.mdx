@@ -1,0 +1,103 @@
+---
+title: Handoffs
+description: Delegating between specialised agents without infinite loops.
+---
+
+<Callout type="warn">
+  **Not shipped yet.** The runtime already carries the pieces a handoff needs —
+  agents are cheap immutable values, and events name the acting agent — so this
+  is additive.
+</Callout>
+
+## Intended API
+
+A handoff is modelled as a tool, because that is what it is from the model's point
+of view: a capability it can choose to invoke.
+
+```ts
+const billing = new Agent({
+  name: 'billing',
+  instructions: 'You handle invoices and refunds.',
+  model,
+  tools: [lookupInvoice, issueRefund],
+})
+
+const technical = new Agent({
+  name: 'technical',
+  instructions: 'You handle bugs and outages.',
+  model,
+  tools: [searchLogs, createIssue],
+})
+
+const triage = new Agent({
+  name: 'triage',
+  instructions:
+    'Route the user to the right specialist. Do not answer directly.',
+  model,
+  handoffs: [billing, technical],
+})
+
+const result = await triage.run('I was charged twice for March.')
+
+result.output // the billing agent's answer
+result.agentPath // ['triage', 'billing']
+```
+
+### Context transfer
+
+By default the receiving agent gets the full conversation. A `filter` narrows it —
+useful when the specialist should not see everything, or when the transcript is
+long enough to cost real money:
+
+```ts
+handoffs: [
+  {
+    agent: billing,
+    filter: (messages) => messages.slice(-4),
+    // Optional: a briefing note from the routing agent
+    describe: 'The user reports a duplicate charge in March.',
+  },
+]
+```
+
+### Loop prevention
+
+Three limits, because agents handing work back and forth is the obvious failure
+mode:
+
+- **A depth ceiling** (`maxHandoffs`, default 5) — the run stops with
+  `stopReason: 'max_handoffs'` rather than continuing.
+- **Cycle detection** — an A → B → A → B pattern is broken rather than followed.
+- **A shared turn budget** — `maxTurns` counts across the whole run, not per
+  agent, so a chain cannot multiply your bill.
+
+### Visibility
+
+Handoffs appear in the event stream, so a trace shows which agent did what:
+
+```ansi
+▶ run_m9x2k1p  triage · anthropic/claude-opus-5
+  ⇄ handoff  triage → billing
+  ↳ lookup_invoice {"month":"2026-03"}
+    → {"charges":2,"total":"$98.00"} 84ms
+✔ finish · 3 turns · billing · 612 in / 88 out · 2.4s
+```
+
+## What works today
+
+Orchestrate in your own code. It is more verbose than a declarative handoff, but
+it is explicit, debuggable, and available now:
+
+```ts
+const route = await triage.run(message, {
+  toolChoice: { type: 'tool', name: 'classify' },
+})
+
+const category = /* read from route.steps[0].toolResults[0].output */
+const specialist = category === 'billing' ? billing : technical
+
+const result = await specialist.run(message, { messages: route.messages })
+```
+
+Because an `Agent` is immutable configuration with no per-run state, creating and
+composing several of them is cheap and safe under concurrency.

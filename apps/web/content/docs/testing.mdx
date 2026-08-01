@@ -1,0 +1,284 @@
+---
+title: Testing
+description: Test agents offline and deterministically, with no API key and no bill.
+---
+
+Agent tests that hit a real model are slow, flaky, and expensive, so they end up
+not being written. `just-another-sdk/testing` ships the helpers to avoid that —
+the same ones the SDK's own 64-test suite uses, which is why it runs in about
+250ms.
+
+```bash
+# nothing to install — it is part of the package
+```
+
+## Scripting a model
+
+`mockProvider` takes a script of turns. A turn with `toolCalls` makes the agent
+execute tools; a turn with only `text` ends the run.
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { Agent } from 'just-another-sdk'
+import { mockProvider } from 'just-another-sdk/testing'
+
+it('answers using the weather tool', async () => {
+  const model = mockProvider([
+    { toolCalls: [{ toolName: 'get_weather', input: { city: 'Paris' } }] },
+    { text: 'It is 18°C and clear in Paris.' },
+  ])
+
+  const agent = new Agent({ name: 'test', model, tools: [getWeather] })
+  const result = await agent.run('Weather in Paris?')
+
+  expect(result.text).toBe('It is 18°C and clear in Paris.')
+  expect(result.stopReason).toBe('finish')
+  expect(result.turns).toBe(2)
+})
+```
+
+### Asserting on what was sent
+
+Every request is recorded, so you can test the prompt as well as the answer:
+
+```ts
+expect(model.calls).toHaveLength(2)
+expect(model.calls[0].system).toBe('Be concise.')
+expect(model.calls[0].tools?.map((tool) => tool.name)).toEqual(['get_weather'])
+
+// The second call must carry the tool-call turn and its result
+const second = model.calls[1].messages
+expect(second.at(-2)?.role).toBe('assistant')
+expect(second.at(-1)?.role).toBe('tool')
+```
+
+<TypeTable
+  type={{
+    text: { type: 'string', description: 'Assistant text for this turn.' },
+    toolCalls: {
+      type: '{ toolName, input?, toolCallId? }[]',
+      description: 'Tools the model asks for.',
+    },
+    usage: {
+      type: 'Partial<Usage>',
+      description: 'Token counts. Defaults to 10 in / 5 out.',
+    },
+    finishReason: {
+      type: 'FinishReason',
+      description: 'Defaults to tool_calls or stop, inferred from content.',
+    },
+    error: {
+      type: 'Error',
+      description:
+        'Throw instead of responding — for testing provider failures.',
+    },
+    delayMs: {
+      type: 'number',
+      description:
+        'Delay before responding — for testing timeouts and cancellation.',
+    },
+  }}
+/>
+
+### Dynamic responses
+
+Pass a function to react to the incoming request:
+
+```ts
+const model = mockProvider((request, index) => {
+  const lastMessage = request.messages.at(-1)
+  if (index === 0)
+    return { toolCalls: [{ toolName: 'search', input: { q: 'x' } }] }
+  return { text: `I saw ${request.messages.length} messages.` }
+})
+```
+
+### Catching extra model calls
+
+By default the last turn repeats when the script runs out, which keeps a loop test
+from failing for the wrong reason. Use `'throw'` to assert an exact call count:
+
+```ts
+const model = mockProvider([{ text: 'done' }], { onExhausted: 'throw' })
+// A second model call now fails the test loudly.
+```
+
+## Asserting on events
+
+`collectEvents` records the run so you can test what the agent _did_, not just
+what it returned. An ordering assertion is the cheapest way to catch a regression
+in the loop:
+
+```ts
+import { collectEvents, mockProvider } from 'just-another-sdk/testing'
+
+const collected = collectEvents()
+
+await new Agent({ name: 'test', model, tools: [getWeather] }).run('go', {
+  onEvent: collected.listener,
+})
+
+expect(collected.types()).toEqual([
+  'run.start',
+  'model.request',
+  'model.response',
+  'tool.start',
+  'tool.end',
+  'model.request',
+  'model.response',
+  'run.finish',
+])
+
+expect(collected.first('tool.end')?.isError).toBe(false)
+expect(collected.last('run.finish')?.stopReason).toBe('finish')
+expect(collected.count('model.request')).toBe(2)
+```
+
+## Testing the paths that matter
+
+The interesting tests are the failure ones, and they are all offline.
+
+```ts
+it('recovers when a tool throws', async () => {
+  const broken = tool({
+    name: 'broken',
+    description: 'Always fails.',
+    execute: () => {
+      throw new Error('upstream down')
+    },
+  })
+
+  const model = mockProvider([
+    { toolCalls: [{ toolName: 'broken' }] },
+    { text: 'Sorry, that service is unavailable.' },
+  ])
+
+  const result = await new Agent({ name: 'test', model, tools: [broken] }).run(
+    'go',
+  )
+
+  // The run completed rather than throwing
+  expect(result.stopReason).toBe('finish')
+  expect(result.steps[0].toolResults[0].isError).toBe(true)
+})
+
+it('stops at maxTurns instead of looping forever', async () => {
+  // A model that always calls a tool — the pathological case
+  const model = mockProvider([
+    { toolCalls: [{ toolName: 'get_weather', input: { city: 'X' } }] },
+  ])
+
+  const result = await new Agent({
+    name: 'test',
+    model,
+    tools: [getWeather],
+    maxTurns: 3,
+  }).run('go')
+
+  expect(result.stopReason).toBe('max_turns')
+  expect(model.calls).toHaveLength(3)
+})
+
+it('rejects invalid tool input without calling the handler', async () => {
+  const execute = vi.fn()
+  const strict = tool({
+    name: 'strict',
+    description: 'x',
+    inputSchema: z.object({ city: z.string() }),
+    execute,
+  })
+
+  const model = mockProvider([
+    { toolCalls: [{ toolName: 'strict', input: { city: 123 } }] },
+    { text: 'recovered' },
+  ])
+
+  await new Agent({ name: 'test', model, tools: [strict] }).run('go')
+
+  expect(execute).not.toHaveBeenCalled()
+})
+
+it('surfaces a provider failure as a typed error', async () => {
+  const model = mockProvider([{ error: new Error('boom') }])
+  const agent = new Agent({ name: 'test', model })
+
+  await expect(agent.run('go')).rejects.toMatchObject({
+    code: 'provider_error',
+  })
+})
+```
+
+## Testing a provider
+
+Providers accept an injected `fetch`, so you can exercise the real translation
+and error-mapping code with no network:
+
+```ts
+const fetchMock: typeof fetch = (url, init) =>
+  Promise.resolve(
+    new Response(
+      JSON.stringify({
+        choices: [{ finish_reason: 'stop', message: { content: 'hi' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ),
+  )
+
+const model = openrouter('anthropic/claude-opus-5', {
+  apiKey: 'sk-test',
+  fetch: fetchMock,
+})
+```
+
+Use it to pin error mapping too:
+
+```ts
+const rateLimited: typeof fetch = () =>
+  Promise.resolve(
+    new Response('{}', { status: 429, headers: { 'retry-after': '30' } }),
+  )
+
+await expect(agent.run('go')).rejects.toMatchObject({
+  code: 'rate_limit_error',
+  retryable: true,
+  retryAfterMs: 30_000,
+})
+```
+
+## Should you ever test against a real model?
+
+Yes — but keep it out of the unit suite. Put one or two live tests behind an
+environment check so CI stays fast and deterministic:
+
+```ts
+const live = process.env.OPENROUTER_API_KEY ? it : it.skip
+
+live(
+  'works against a real model',
+  async () => {
+    const agent = new Agent({
+      name: 'live',
+      model: openrouter('anthropic/claude-haiku-4-5'),
+    })
+    const result = await agent.run('Reply with the single word: ok')
+    expect(result.text.toLowerCase()).toContain('ok')
+  },
+  30_000,
+)
+```
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/events"
+    title="Events & tracing"
+    description="The event stream you are asserting on."
+  />
+  <Card
+    href="/docs/examples"
+    title="Examples"
+    description="Runnable projects in the repository."
+  />
+</Cards>

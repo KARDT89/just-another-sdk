@@ -1,0 +1,26 @@
+{
+  "title": "Documentation",
+  "root": true,
+  "pages": [
+    "index",
+    "installation",
+    "quickstart",
+    "---Core---",
+    "agents",
+    "tools",
+    "providers",
+    "---Reliability---",
+    "errors",
+    "events",
+    "testing",
+    "---Coming next---",
+    "streaming",
+    "sessions",
+    "structured-output",
+    "guardrails",
+    "handoffs",
+    "---Reference---",
+    "examples",
+    "api"
+  ]
+}

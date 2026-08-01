@@ -1,0 +1,162 @@
+---
+title: Installation
+description: Install the package, add a validator, and set up a model key.
+---
+
+## Install
+
+<Tabs items={['pnpm', 'npm', 'bun', 'yarn']}>
+  <Tab value="pnpm">```bash pnpm add just-another-sdk ```</Tab>
+  <Tab value="npm">```bash npm i just-another-sdk ```</Tab>
+  <Tab value="bun">```bash bun add just-another-sdk ```</Tab>
+  <Tab value="yarn">```bash yarn add just-another-sdk ```</Tab>
+</Tabs>
+
+That is one package with **no runtime dependencies**. Nothing else is pulled in.
+
+## Add a validator
+
+The SDK validates tool inputs through
+[Standard Schema](https://standardschema.dev), so you bring your own validator.
+It is an optional peer dependency — install whichever you already use:
+
+<Tabs items={['Zod', 'Valibot', 'ArkType']}>
+  <Tab value="Zod">
+```bash
+pnpm add zod
+```
+
+Zod is the smoothest path: the JSON Schema the model sees is derived from your
+schema automatically, with no extra setup.
+
+  </Tab>
+  <Tab value="Valibot">
+```bash
+pnpm add valibot
+```
+
+Validation works out of the box. Valibot has no built-in JSON Schema converter,
+so pass an explicit `parameters` schema on each tool — see
+[Tools](/docs/tools#other-validators).
+
+  </Tab>
+  <Tab value="ArkType">
+```bash
+pnpm add arktype
+```
+
+Validation works out of the box. Pass an explicit `parameters` schema on each
+tool — see [Tools](/docs/tools#other-validators).
+
+  </Tab>
+</Tabs>
+
+<Callout type="info">
+  Tools without arguments need no validator at all, so you can skip this step
+  entirely if your agent only calls no-argument tools.
+</Callout>
+
+## Get a model key
+
+The fastest option is [OpenRouter](https://openrouter.ai) — one key reaches
+hundreds of models across every major vendor, which makes swapping models a
+one-string change.
+
+<Steps>
+<Step>
+### Create a key
+
+Sign up at [openrouter.ai/keys](https://openrouter.ai/keys) and create an API
+key. It starts with `sk-or-`.
+
+</Step>
+
+<Step>
+### Put it in your environment
+
+```bash title=".env"
+OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+The provider reads `OPENROUTER_API_KEY` automatically. You can also pass it
+explicitly, which is what you want in a serverless function that gets its
+secrets from elsewhere:
+
+```ts
+openrouter('anthropic/claude-opus-5', { apiKey: mySecret })
+```
+
+</Step>
+
+<Step>
+### Load it
+
+Node can read a `.env` file with no library:
+
+```bash
+node --env-file=.env agent.ts
+```
+
+</Step>
+</Steps>
+
+Prefer a different vendor? [Providers](/docs/providers) covers OpenAI, Groq,
+Together, DeepSeek, local Ollama and vLLM, and how to write your own.
+
+<Callout type="warn">
+  Never commit a key. Add `.env` to `.gitignore`. The SDK will not leak a key
+  into an error message or a trace — see [Errors](/docs/errors#secret-safety) —
+  but it cannot help with a key committed to git.
+</Callout>
+
+## Verify
+
+```ts title="hello.ts"
+import { Agent } from 'just-another-sdk'
+import { openrouter } from 'just-another-sdk/providers'
+
+const agent = new Agent({
+  name: 'hello',
+  model: openrouter('anthropic/claude-opus-5'),
+})
+
+console.log((await agent.run('Reply with the single word: working')).output)
+```
+
+```bash
+node --env-file=.env hello.ts
+```
+
+If the key is missing or wrong you get a `ConfigurationError` or
+`AuthenticationError` naming the exact problem rather than a stack trace.
+
+## TypeScript
+
+No configuration required. For the best experience make sure `strict` is on, and
+if you are on an older setup, use `"moduleResolution": "bundler"` (or `node16`
+and later) so the package's subpath exports resolve.
+
+```json title="tsconfig.json"
+{
+  "compilerOptions": {
+    "strict": true,
+    "module": "preserve",
+    "moduleResolution": "bundler"
+  }
+}
+```
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/quickstart"
+    title="Quick start"
+    description="Build an agent that calls a tool."
+  />
+  <Card
+    href="/docs/providers"
+    title="Providers"
+    description="Use OpenAI, Groq, or a local model."
+  />
+</Cards>

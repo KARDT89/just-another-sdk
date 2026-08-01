@@ -1,0 +1,225 @@
+---
+title: Providers
+description: OpenRouter, OpenAI, local models, and writing your own.
+---
+
+A provider binds the SDK to a model. Every provider that ships with the package
+is a plain `fetch` wrapper — no vendor SDK, no dependency, which is why the
+package installs with an empty dependency tree and runs unchanged on Node, Bun,
+Deno, and edge runtimes.
+
+## OpenRouter
+
+One key reaches hundreds of models across every major vendor, which makes
+swapping models a one-string change.
+
+```ts
+import { openrouter } from 'just-another-sdk/providers'
+
+openrouter('anthropic/claude-opus-5')
+openrouter('openai/gpt-5')
+openrouter('google/gemini-2.5-pro')
+openrouter('meta-llama/llama-4-maverick')
+```
+
+Reads `OPENROUTER_API_KEY` from the environment by default.
+
+<TypeTable
+  type={{
+    apiKey: {
+      type: 'string',
+      description: 'Defaults to process.env.OPENROUTER_API_KEY.',
+    },
+    baseUrl: { type: 'string', default: 'https://openrouter.ai/api/v1' },
+    referer: {
+      type: 'string',
+      description:
+        'Your site URL. Used for attribution on OpenRouter model leaderboards.',
+    },
+    title: {
+      type: 'string',
+      description: 'Your app name, shown alongside the referer.',
+    },
+    only: {
+      type: 'string[]',
+      description: 'Restrict which upstream providers OpenRouter may route to.',
+    },
+    headers: {
+      type: 'Record<string, string>',
+      description: 'Extra headers merged into every request.',
+    },
+    fetch: { type: 'typeof fetch', description: 'Injected for tests.' },
+  }}
+/>
+
+```ts
+openrouter('anthropic/claude-opus-5', {
+  referer: 'https://myapp.com',
+  title: 'My App',
+  only: ['anthropic'], // do not route this to a third-party host
+})
+```
+
+Model ids are `vendor/model`, exactly as listed at
+[openrouter.ai/models](https://openrouter.ai/models).
+
+## OpenAI
+
+```ts
+import { openai } from 'just-another-sdk/providers'
+
+openai('gpt-5')
+openai('gpt-5-mini', { organization: 'org_…', project: 'proj_…' })
+```
+
+Reads `OPENAI_API_KEY`.
+
+## Anything OpenAI-compatible
+
+`compatible()` points the same transport at any endpoint exposing
+`POST /chat/completions` — Groq, Together, Fireworks, DeepSeek, xAI, Ollama,
+vLLM, LM Studio, or your own gateway.
+
+```ts
+import { compatible } from 'just-another-sdk/providers'
+
+// Groq
+compatible('llama-3.3-70b-versatile', {
+  baseUrl: 'https://api.groq.com/openai/v1',
+  apiKey: process.env.GROQ_API_KEY,
+  providerId: 'groq', // appears in traces
+})
+
+// Ollama, running locally — no key needed
+compatible('llama3.1', { baseUrl: 'http://localhost:11434/v1' })
+
+// Your own gateway
+compatible('internal-model', {
+  baseUrl: 'https://llm.internal.acme.com/v1',
+  apiKey: process.env.GATEWAY_TOKEN,
+  providerId: 'acme-gateway',
+})
+```
+
+<Callout type="tip">
+  Local models are the cheapest way to develop against a tool-calling loop.
+  Point `compatible()` at Ollama, iterate until the logic is right, then switch
+  the one line to a hosted model.
+</Callout>
+
+## Swapping models
+
+Because the provider is just a config value, an A/B test or a tier downgrade is a
+`clone()`:
+
+```ts
+const premium = agent
+const standard = agent.clone({
+  model: openrouter('anthropic/claude-haiku-4-5'),
+})
+
+const result = await (user.isPro ? premium : standard).run(prompt)
+```
+
+## Writing a provider
+
+Implement one method. This is the entire contract:
+
+```ts
+import type { ModelProvider } from 'just-another-sdk'
+
+export function myProvider(modelId: string): ModelProvider {
+  return {
+    providerId: 'mine',
+    modelId,
+
+    async generate(request, options) {
+      const response = await fetch('https://api.example.com/v1/generate', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${process.env.MY_KEY}` },
+        body: JSON.stringify(translateRequest(request)),
+        signal: options?.signal,
+      })
+
+      if (!response.ok) throw translateError(response)
+
+      return translateResponse(await response.json())
+    },
+  }
+}
+```
+
+A provider is responsible for exactly three things: translating the request into
+its vendor's wire format, making the call, and translating the response and any
+errors back. It must **not** retry, must not manage conversation state, and must
+not know that agents or tools-as-functions exist — that keeps the agent loop
+provider-agnostic and makes a new vendor a single self-contained file.
+
+### What you receive
+
+```ts
+interface ModelRequest {
+  messages: ModelMessage[] // conversation so far, excluding the system message
+  system?: string // hoisted instructions
+  tools?: ToolDefinition[] // { name, description, parameters }
+  toolChoice?: ToolChoice
+  maxOutputTokens?: number
+  temperature?: number
+  stopSequences?: string[]
+  responseFormat?: ResponseFormat
+  metadata?: Record<string, string>
+  providerOptions?: Record<string, unknown> // vendor-specific escape hatch
+}
+```
+
+### What you return
+
+```ts
+interface ModelResponse {
+  content: (TextPart | ToolCallPart)[]
+  finishReason: 'stop' | 'tool_calls' | 'length' | 'content_filter' | 'other'
+  usage: { inputTokens: number; outputTokens: number; totalTokens: number }
+  modelId: string // the model that actually served the request
+  raw?: unknown // untouched provider payload, for debugging
+}
+```
+
+### Translating errors
+
+Map vendor failures onto the SDK's error types so callers can handle them
+uniformly, and never put credentials in a message:
+
+```ts
+import {
+  AuthenticationError,
+  RateLimitError,
+  ProviderError,
+} from 'just-another-sdk'
+
+if (response.status === 401) throw new AuthenticationError('…')
+if (response.status === 429) throw new RateLimitError('…', { retryAfterMs })
+throw new ProviderError(`… returned ${response.status}`, {
+  status: response.status,
+})
+```
+
+## Coming next
+
+Native Anthropic (Messages API) and Gemini (`generateContent`) providers, plus
+streaming and model fallback chains. Both vendors are already reachable today
+through OpenRouter.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/errors"
+    title="Errors"
+    description="The error taxonomy providers map onto."
+  />
+  <Card
+    href="/docs/testing"
+    title="Testing"
+    description="Test a provider without the network."
+  />
+</Cards>

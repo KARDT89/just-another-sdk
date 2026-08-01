@@ -1,0 +1,323 @@
+---
+title: Tools
+description: Typed handlers, input validation, timeouts, concurrency, and failure recovery.
+---
+
+A tool is a function the model can decide to call. It has four parts: a name, a
+description the model reads, a schema its arguments are validated against, and
+the function itself.
+
+```ts
+import { tool } from 'just-another-sdk'
+import * as z from 'zod'
+
+const getWeather = tool({
+  name: 'get_weather',
+  description:
+    'Get the current weather for a city. Call this whenever the user asks ' +
+    'about conditions, temperature, or whether to take an umbrella.',
+  inputSchema: z.object({
+    city: z.string().describe('City name, e.g. "Paris"'),
+    unit: z.enum(['celsius', 'fahrenheit']).default('celsius'),
+  }),
+  execute: async ({ city, unit }) => {
+    //             ^^^^^^^^^^^^ typed from the schema, already validated
+    const response = await fetch(`https://api.example.com/weather?city=${city}`)
+    return response.json()
+  },
+})
+```
+
+Defining a tool performs no I/O and touches no global state, so tools are safe to
+declare at module scope and share between agents.
+
+## Descriptions matter more than you expect
+
+The `description` is the single biggest lever on tool-selection quality. Write it
+for the model: state _when_ to call the tool, not just what it does.
+
+```ts
+// Weak — describes the implementation
+description: 'Queries the weather API.'
+
+// Strong — describes the decision
+description: 'Get the current weather for a city. Call this whenever the user asks about ' +
+  'conditions, temperature, or what to wear. Do not use it for forecasts ' +
+  'more than 24 hours ahead.'
+```
+
+Use `.describe()` on individual fields for the same reason — it becomes the field
+description in the JSON Schema the model sees.
+
+## Input validation
+
+Arguments are validated **before your handler runs**. Three things follow:
+
+1. Your handler receives parsed, typed values — including any coercions and
+   defaults your schema applies.
+2. Invalid arguments never reach your code.
+3. The model gets a per-field error message and a chance to correct its own call.
+
+```ts
+// The model sends { city: 123 }
+// → handler is never invoked
+// → the model receives:
+//   { error: 'Tool "get_weather" was called with invalid input:
+//              • city: Expected string, received number',
+//     code: 'invalid_tool_input' }
+// → the model retries with { city: 'Paris' }
+```
+
+That loop is why validation is not merely a guard: it is how the agent recovers.
+
+### Any Standard Schema validator
+
+Validation goes through [Standard Schema](https://standardschema.dev), so Zod,
+Valibot, ArkType and others all work. Zod is the smoothest because the JSON
+Schema shown to the model can be derived automatically.
+
+```ts
+import * as v from 'valibot'
+
+const t = tool({
+  name: 'greet',
+  description: 'Greet someone by name.',
+  inputSchema: v.object({ name: v.string() }),
+  execute: ({ name }) => `Hello, ${name}`, // still typed
+})
+```
+
+### Other validators [#other-validators]
+
+Standard Schema covers validation but not JSON Schema generation. For a validator
+without a converter, pass `parameters` explicitly:
+
+```ts
+const t = tool({
+  name: 'greet',
+  description: 'Greet someone by name.',
+  inputSchema: v.object({ name: v.string() }), // validates
+  parameters: {
+    // what the model sees
+    type: 'object',
+    properties: { name: { type: 'string', description: 'Person to greet' } },
+    required: ['name'],
+    additionalProperties: false,
+  },
+  execute: ({ name }) => `Hello, ${name}`,
+})
+```
+
+The failure mode without it is explicit rather than silent:
+
+```text
+InvalidSchemaError: Could not derive a JSON Schema for tool "greet" from its
+"valibot" schema.
+
+→ Pass an explicit `parameters` JSON Schema alongside `inputSchema` in your
+  tool() call, or register a converter with registerJsonSchemaConverter('valibot', fn).
+```
+
+### No-argument tools
+
+Omit `inputSchema` entirely:
+
+```ts
+const getTime = tool({
+  name: 'get_current_time',
+  description: 'Get the current UTC time. Use for anything time-sensitive.',
+  execute: () => new Date().toISOString(),
+})
+```
+
+## The handler
+
+```ts
+execute: async (input, context) => { … }
+```
+
+`context` carries the run's identity and its cancellation signal:
+
+<TypeTable
+  type={{
+    runId: {
+      type: 'string',
+      description:
+        'The run this call belongs to. Use it to correlate your own logs.',
+    },
+    toolCallId: {
+      type: 'string',
+      description: 'Provider-assigned id of this specific call.',
+    },
+    agentName: {
+      type: 'string',
+      description: 'The agent that invoked the tool.',
+    },
+    turn: {
+      type: 'number',
+      description: '1-based turn number within the run.',
+    },
+    signal: {
+      type: 'AbortSignal',
+      description: 'Aborted when the run is cancelled or this call times out.',
+    },
+  }}
+/>
+
+Forward `signal` to anything that accepts one. This is what makes cancellation
+and timeouts actually stop work rather than just stop waiting for it:
+
+```ts
+execute: async ({ city }, { signal }) => {
+  const response = await fetch(url, { signal })
+  return response.json()
+}
+```
+
+### Return values
+
+Return anything serializable. Objects are JSON-encoded on the way to the model,
+so prefer a shape that reads well:
+
+```ts
+// Good — self-describing
+return { city: 'Paris', tempC: 18, summary: 'clear' }
+
+// Worse — the model has to guess what the numbers mean
+return [18, 'clear']
+```
+
+## Concurrency
+
+When a model requests several tools in one turn, they run **concurrently** — it
+emitted them together precisely because they are independent, and serializing
+would multiply latency for no benefit.
+
+```ts
+// Model asks for get_weather + get_time + get_events in one turn
+// → all three start at once
+// → results are returned in the model's original call order
+```
+
+Ordering is preserved regardless of which finished first, so the conversation
+stays deterministic and reproducible.
+
+## Timeouts
+
+Set a deadline per tool, or rely on the agent's default of 30 seconds:
+
+```ts
+const slowTool = tool({
+  name: 'generate_report',
+  description: 'Generate a PDF report.',
+  timeoutMs: 120_000, // this one is genuinely slow
+  execute: async (input, { signal }) => generate(input, signal),
+})
+```
+
+A timeout does not fail the run. The model receives a `timeout_error` result and
+carries on:
+
+```text
+✗ generate_report  Tool "generate_report" timed out after 120000ms  120001ms
+✔ finish · 3 turns
+```
+
+## When a tool fails
+
+By default (`onToolError: 'return'`) any failure becomes a tool result the model
+can read:
+
+```ts
+const flaky = tool({
+  name: 'get_air_quality',
+  description: 'Get the air-quality index for a city.',
+  execute: () => {
+    throw new Error('upstream returned 503')
+  },
+})
+
+const result = await agent.run('Weather and air quality in Paris?')
+
+result.stopReason // 'finish' — the run completed
+result.output // 'It is 18°C and clear. Air quality is unavailable right now.'
+```
+
+The model apologises or routes around the failure, which is almost always what
+you want in a user-facing product.
+
+Switch to `'throw'` when a tool failure means the whole task is void:
+
+```ts
+const agent = new Agent({
+  name: 'payments',
+  model,
+  tools: [chargeCard],
+  onToolError: 'throw', // do not let the model improvise around a payment failure
+})
+```
+
+<Callout type="warn">
+  Reach for `'throw'` on anything with side effects. A model that is told "the
+  charge failed" may decide to try again — which is not what you want from a
+  payment tool.
+</Callout>
+
+### Failure codes
+
+Every failure result carries a code, so you can act on it in an event handler:
+
+| `code`                 | Cause                                             |
+| ---------------------- | ------------------------------------------------- |
+| `invalid_tool_input`   | Arguments failed schema validation                |
+| `tool_execution_error` | Your handler threw                                |
+| `timeout_error`        | The call exceeded its deadline                    |
+| `tool_not_found`       | The model asked for a tool that is not registered |
+| `aborted`              | The run was cancelled                             |
+
+```ts
+await agent.run(prompt, {
+  onEvent: (event) => {
+    if (event.type === 'tool.end' && event.isError) {
+      metrics.increment('tool_failure', { tool: event.toolName })
+    }
+  },
+})
+```
+
+## Constraining tool choice
+
+```ts
+// The model must call some tool
+await agent.run(prompt, { toolChoice: 'required' })
+
+// The model must call this specific tool — useful for extraction
+await agent.run(prompt, {
+  toolChoice: { type: 'tool', name: 'extract_fields' },
+})
+
+// Disable tools for this run
+await agent.run(prompt, { toolChoice: 'none' })
+```
+
+## Naming rules
+
+Names must match `[A-Za-z0-9_-]{1,64}`, validated at definition time so a
+typo becomes a clear local error rather than a confusing provider rejection.
+`snake_case` is the convention, and descriptive beats short: `get_weather` over
+`weather`.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/errors"
+    title="Errors"
+    description="The full error taxonomy and retry semantics."
+  />
+  <Card
+    href="/docs/testing"
+    title="Testing"
+    description="Assert tool behaviour offline."
+  />
+</Cards>

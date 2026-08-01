@@ -1,0 +1,13 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+  - 'examples/*'
+# These three ship platform-specific native binaries and need their install
+# scripts to run. All are build-time only, none reach the published SDK:
+#   esbuild       — via `tsx`, runs the examples
+#   sharp         — via Next.js, optimises images for the docs site
+#   unrs-resolver — via eslint-config-next, resolves imports while linting
+allowBuilds:
+  esbuild: true
+  sharp: true
+  unrs-resolver: true

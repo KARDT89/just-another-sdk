@@ -1,0 +1,102 @@
+---
+title: Guardrails
+description: Input and output validation, tool gating, and human approval.
+---
+
+<Callout type="warn">
+  **Not shipped yet.** Some of what guardrails are usually used for is already
+  covered by existing features — see *What works today* below.
+</Callout>
+
+## Intended API
+
+Guardrails are functions that inspect something and either allow it, rewrite it,
+or reject it.
+
+```ts
+const agent = new Agent({
+  name: 'support',
+  model,
+  tools: [refundOrder],
+
+  inputGuardrails: [
+    // Reject before spending a single token
+    (input) =>
+      input.length > 10_000 ? { reject: 'Message too long.' } : { allow: true },
+  ],
+
+  outputGuardrails: [
+    // Redact before the answer reaches the user
+    (text) => ({ allow: true, replace: stripPII(text) }),
+  ],
+
+  toolGuardrails: {
+    // Gate a specific tool
+    refund_order: async ({ input }) =>
+      input.amount > 100 ? { requireApproval: true } : { allow: true },
+  },
+})
+```
+
+### Approval
+
+A tool that requires approval suspends the run instead of executing:
+
+```ts
+const result = await agent.run('Refund order 1234')
+
+if (result.stopReason === 'awaiting_approval') {
+  const decision = await askHuman(result.pendingApproval)
+  const final = await agent.resume(result, decision)
+}
+```
+
+This needs run state to be serializable across a process boundary, which is why
+it is scheduled alongside [sessions](/docs/sessions).
+
+## What works today
+
+Several things people reach for guardrails to do are already covered:
+
+**Dangerous tool calls** — validate in the schema, so an out-of-range value never
+reaches your handler:
+
+```ts
+inputSchema: z.object({
+  amount: z.number().positive().max(100), // over 100 is rejected, model is told why
+})
+```
+
+**Approval, manually** — gate inside the handler. It is not as clean as a
+declarative guardrail, but it works and it is explicit:
+
+```ts
+execute: async ({ orderId, amount }) => {
+  if (amount > 100) {
+    const approved = await requestApproval({ orderId, amount })
+    if (!approved)
+      return { refused: true, reason: 'A human declined this refund.' }
+  }
+  return processRefund(orderId, amount)
+}
+```
+
+Returning a refusal rather than throwing is usually better: the model reads it and
+explains the outcome to the user.
+
+**Blast-radius limits** — `onToolError: 'throw'` on anything with side effects, so
+a failed write is never improvised around:
+
+```ts
+const agent = new Agent({
+  name: 'payments',
+  model,
+  tools: [charge],
+  onToolError: 'throw',
+})
+```
+
+**Input length** — check before calling `run()`. No framework needed.
+
+**Secret leakage** — already guaranteed. An API key cannot reach an error, an
+event, or a trace; see [Errors](/docs/errors#secret-safety).

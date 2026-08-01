@@ -1,0 +1,43 @@
+{
+  "name": "web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Landing page and documentation for just-another-sdk.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "next typegen && tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "clean": "rm -rf .next .source .turbo"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cnfast": "^0.1.0",
+    "fumadocs-core": "16.14.0",
+    "fumadocs-mdx": "15.2.1",
+    "fumadocs-ui": "npm:@fumadocs/base-ui@16.14.0",
+    "lucide-react": "^1.28.0",
+    "next": "16.2.12",
+    "radix-ui": "^1.6.7",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "shadcn": "^4.16.1",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/mdx": "^2.0.14",
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "16.2.12",
+    "eslint-config-prettier": "^10.1.8",
+    "postcss": "^8.5.24",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
+    "typescript": "^6.0.3"
+  }
+}

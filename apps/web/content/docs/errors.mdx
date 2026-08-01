@@ -1,0 +1,243 @@
+---
+title: Errors
+description: One error type, machine-readable codes, and where secrets are guaranteed not to appear.
+---
+
+## One type, always
+
+Everything the SDK throws is an `AgentError`. Catch one type, then switch on
+`code`:
+
+```ts
+import { isAgentError } from 'just-another-sdk'
+
+try {
+  const result = await agent.run(prompt)
+} catch (error) {
+  if (!isAgentError(error)) throw error // not ours — rethrow
+
+  console.error(error.code) // 'rate_limit_error'
+  console.error(error.retryable) // true
+  console.error(error.message) // includes an actionable hint
+  console.error(error.toJSON()) // log-safe structured form
+}
+```
+
+Provider errors never escape unwrapped, so you do not need a separate branch per
+vendor.
+
+## What throws, and what does not
+
+This distinction is the most important thing on this page.
+
+| Situation                                          | Behaviour                                                                     |
+| -------------------------------------------------- | ----------------------------------------------------------------------------- |
+| A tool throws                                      | **Does not throw.** Fed back to the model as a tool result; the run completes |
+| Invalid tool arguments                             | **Does not throw.** The model gets a per-field error and retries              |
+| A tool times out                                   | **Does not throw.** The model is told and carries on                          |
+| `maxTurns` reached                                 | **Does not throw.** Returns with `stopReason: 'max_turns'`                    |
+| Provider is down, rate-limited, or rejects the key | Throws                                                                        |
+| The run is cancelled or times out                  | Throws                                                                        |
+| A tool fails under `onToolError: 'throw'`          | Throws                                                                        |
+| Misconfiguration                                   | Throws, at construction time                                                  |
+
+A `RunResult` in hand therefore always means the agent produced something.
+
+## Codes
+
+<TypeTable
+  type={{
+    configuration_error: {
+      type: 'not retryable',
+      description:
+        'A missing key, or an invalid option. Raised eagerly, usually at construction.',
+    },
+    authentication_error: {
+      type: 'not retryable',
+      description: 'The provider rejected the credentials.',
+    },
+    rate_limit_error: {
+      type: 'retryable',
+      description:
+        'Rate-limited. Carries retryAfterMs when the provider tells us.',
+    },
+    provider_error: {
+      type: 'sometimes',
+      description:
+        'An unclassified non-2xx. Retryable for 408, 409, 429, and 5xx.',
+    },
+    network_error: {
+      type: 'retryable',
+      description: 'fetch itself failed — DNS, TLS, connection reset.',
+    },
+    timeout_error: {
+      type: 'retryable',
+      description: 'A configured deadline elapsed.',
+    },
+    aborted: {
+      type: 'not retryable',
+      description: "The caller's AbortSignal fired.",
+    },
+    invalid_tool_input: {
+      type: 'not retryable',
+      description: 'Tool arguments failed validation. Carries per-path issues.',
+    },
+    tool_execution_error: {
+      type: 'not retryable',
+      description: 'A tool handler threw.',
+    },
+    tool_not_found: {
+      type: 'not retryable',
+      description: 'The model asked for an unregistered tool.',
+    },
+    invalid_schema: {
+      type: 'not retryable',
+      description: 'A schema could not be converted to JSON Schema.',
+    },
+  }}
+/>
+
+Every code has a matching class if you prefer `instanceof`:
+
+```ts
+import { RateLimitError, AuthenticationError } from 'just-another-sdk'
+
+catch (error) {
+  if (error instanceof RateLimitError) await sleep(error.retryAfterMs ?? 1000)
+  if (error instanceof AuthenticationError) alertOncall()
+}
+```
+
+## Retrying
+
+Automatic retries are not in the runtime yet, so for now retry at the call site.
+`retryable` tells you when it is worth it:
+
+```ts
+async function runWithRetry(prompt: string, attempts = 3) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await agent.run(prompt)
+    } catch (error) {
+      const retryable = isAgentError(error) && error.retryable
+      if (!retryable || attempt === attempts) throw error
+
+      const wait =
+        error instanceof RateLimitError && error.retryAfterMs
+          ? error.retryAfterMs
+          : 2 ** attempt * 250
+
+      await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+  }
+  throw new Error('unreachable')
+}
+```
+
+<Callout type="info">
+  Retries with backoff, per-attempt jitter, and model fallback chains are the
+  next milestone. When they land, this hand-rolled loop becomes a config option.
+</Callout>
+
+## Messages carry the fix
+
+Errors include a concrete next step where one exists, because the most common
+"bug" is a setup mistake:
+
+```text
+ConfigurationError: No OpenRouter API key found.
+
+→ Set the OPENROUTER_API_KEY environment variable, or pass
+  openrouter('model-id', { apiKey }). Create a key at https://openrouter.ai/keys
+```
+
+```text
+InvalidToolInputError: Tool "get_weather" was called with invalid input:
+  • location.city: Expected string, received number
+```
+
+## Secret safety [#secret-safety]
+
+The SDK holds itself to one rule: **an API key never appears in a thrown error,
+an emitted event, or a printed trace.**
+
+```ts
+// Given openrouter('m', { apiKey: 'sk-or-v1-secret…' }) and a 401:
+error.message // '… rejected the API key: invalid api key'  ← no key
+error.stack // no key
+error.toJSON() // no key
+error.details // request headers, with authorization redacted
+```
+
+This holds for tool output too. The console tracer redacts before printing, so a
+tool that handles credentials cannot leak them into your terminal or CI log:
+
+```ts
+const leaky = tool({
+  name: 'get_config',
+  description: 'Fetch service config.',
+  execute: () => ({ apiKey: 'sk-live-…', region: 'eu-west-1' }),
+})
+
+// Printed trace:
+//   → {"apiKey":"[redacted]","region":"eu-west-1"}
+```
+
+There is a [test suite](https://github.com/KARDT89/sylo-sdk/blob/main/packages/core/test/secrets.test.ts)
+asserting all of the above, including that a leaked key cannot survive a
+circular-reference or deeply-nested payload.
+
+If you build your own logging, run values through the same helper:
+
+```ts
+import { redact, redactHeaders } from 'just-another-sdk'
+
+logger.debug('tool output', redact(output))
+logger.debug('request', redactHeaders(headers))
+```
+
+<Callout type="warn">
+  Redaction is defence in depth, not a licence to log freely. It recognises the
+  common vendor key formats (`sk-`, `sk-ant-`, `AIza`, `ghp_`, `xox*`, bearer
+  tokens) and sensitive field names — but a bespoke secret format it has never
+  seen will pass through. Do not log raw provider payloads.
+</Callout>
+
+## Cancellation
+
+Cancellation is a standard `AbortSignal`, and it reaches all the way down — the
+in-flight model request and every running tool are aborted, not merely
+abandoned:
+
+```ts
+const controller = new AbortController()
+request.signal.addEventListener('abort', () => controller.abort()) // user closed the tab
+
+try {
+  await agent.run(prompt, { signal: controller.signal })
+} catch (error) {
+  if (isAgentError(error) && error.code === 'aborted') return // expected
+  throw error
+}
+```
+
+A whole-run deadline is `timeoutMs`:
+
+```ts
+await agent.run(prompt, { timeoutMs: 30_000 })
+```
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/events"
+    title="Events & tracing"
+    description="Get partial state from a run that failed midway."
+  />
+  <Card
+    href="/docs/tools"
+    title="Tools"
+    description="Per-tool timeouts and failure policy."
+  />
+</Cards>

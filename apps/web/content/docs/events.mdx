@@ -1,0 +1,219 @@
+---
+title: Events & tracing
+description: One event stream that tracing, metrics, and progress UIs all consume.
+---
+
+Every interesting moment in a run is an event. Tracing, streaming, progress UIs,
+and cost dashboards are all consumers of this one stream rather than separate
+features bolted onto the loop.
+
+## The built-in tracer
+
+```ts
+import { consoleTracer } from 'just-another-sdk'
+
+await agent.run('Weather and time in Paris?', { onEvent: consoleTracer() })
+```
+
+```ansi
+▶ run_m9x2k1p  travel-assistant · anthropic/claude-opus-5
+  ↳ get_weather {"city":"Paris"}
+  ↳ get_time {"city":"Paris"}
+    → {"city":"Paris","tempC":18,"summary":"clear"} 118ms
+    → {"city":"Paris","localTime":"14:32"} 61ms
+    ✗ get_air_quality {"error":"upstream 503","code":"tool_execution_error"} 12ms
+✔ finish · 2 turns · 412 in / 63 out · 1.9s
+```
+
+<TypeTable
+  type={{
+    verbose: {
+      type: 'boolean',
+      default: 'false',
+      description: 'Include per-turn model text, not just the final answer.',
+    },
+    color: {
+      type: 'boolean',
+      description: 'Defaults to on unless NO_COLOR is set.',
+    },
+    write: {
+      type: '(line: string) => void',
+      default: 'console.log',
+      description: 'Send lines somewhere else.',
+    },
+    maxValueLength: {
+      type: 'number',
+      default: '120',
+      description: 'Truncate rendered tool input and output.',
+    },
+  }}
+/>
+
+Tool values are [redacted](/docs/errors#secret-safety) before printing.
+
+## Handling events yourself
+
+`onEvent` is a plain function. Switch on `type`:
+
+```ts
+await agent.run(prompt, {
+  onEvent: (event) => {
+    switch (event.type) {
+      case 'tool.end':
+        metrics.histogram('tool_duration_ms', event.durationMs, {
+          tool: event.toolName,
+          error: String(event.isError),
+        })
+        break
+
+      case 'model.response':
+        metrics.increment('tokens_in', event.usage.inputTokens)
+        metrics.increment('tokens_out', event.usage.outputTokens)
+        break
+
+      case 'run.finish':
+        logger.info('run complete', {
+          runId: event.runId,
+          stopReason: event.stopReason,
+          turns: event.turns,
+        })
+        break
+
+      // Events are additive — always keep a default branch.
+      default:
+        break
+    }
+  },
+})
+```
+
+<Callout type="info">
+  New event types will be added over time, so switch with a `default` branch
+  rather than assuming the union is exhaustive.
+</Callout>
+
+## Two guarantees
+
+**A listener cannot break a run.** Handlers are invoked inside a `try`/`catch` and
+their exceptions are swallowed. Instrumentation is not allowed to change program
+behaviour:
+
+```ts
+await agent.run(prompt, {
+  onEvent: () => {
+    throw new Error('my logger is broken')
+  },
+})
+// The run still completes normally.
+```
+
+**Emitting is synchronous.** The loop never awaits a listener, so adding logging
+cannot slow down or reorder the agent's work. If you need to do something slow,
+queue it:
+
+```ts
+onEvent: (event) => {
+  void queue.push(event) // do not block the loop
+}
+```
+
+## Event reference
+
+Every event carries `id`, `timestamp`, `runId`, and `agentName`.
+
+| Type             | When                                    | Notable fields                                             |
+| ---------------- | --------------------------------------- | ---------------------------------------------------------- |
+| `run.start`      | Always first                            | `modelId`, `input`, `toolNames`                            |
+| `model.request`  | Before each model call                  | `turn`, `messageCount`, `tools`                            |
+| `model.response` | After each model call, before tools run | `text`, `toolCalls`, `finishReason`, `usage`, `durationMs` |
+| `tool.start`     | Before a tool runs, arguments validated | `toolName`, `toolCallId`, `input`                          |
+| `tool.end`       | After a tool finishes or fails          | `result`, `isError`, `durationMs`                          |
+| `run.finish`     | Last event on a successful run          | `stopReason`, `text`, `turns`, `usage`, `durationMs`       |
+| `run.error`      | Last event when the run throws          | `error`, `turn`                                            |
+| `text.delta`     | Streaming only _(coming next)_          | `delta`                                                    |
+
+For a tool-using run the order is deterministic:
+
+```text
+run.start
+  model.request → model.response
+  tool.start … tool.start        (one per call, all before execution)
+  tool.end   … tool.end          (one per call)
+  model.request → model.response
+run.finish
+```
+
+## Partial state from a failed run
+
+A run that throws returns no `RunResult`, so events are how you recover what
+happened before the failure:
+
+```ts
+const seen: AgentEvent[] = []
+
+try {
+  await agent.run(prompt, { onEvent: (event) => seen.push(event) })
+} catch (error) {
+  const toolCalls = seen.filter((event) => event.type === 'tool.end')
+  logger.error('run failed', {
+    error,
+    completedTools: toolCalls.length,
+    tokensSpent: seen
+      .filter((event) => event.type === 'model.response')
+      .reduce((total, event) => total + event.usage.totalTokens, 0),
+  })
+}
+```
+
+## Typed handlers
+
+`EventOfType` narrows a handler to one event type:
+
+```ts
+import type { EventOfType } from 'just-another-sdk'
+
+function onToolEnd(event: EventOfType<'tool.end'>) {
+  //                       ^ fully typed: result, isError, durationMs
+  if (event.isError) alert(event.toolName)
+}
+```
+
+## Traces without an event handler
+
+`RunResult.steps` is the same information, recorded for you:
+
+```ts
+const result = await agent.run(prompt)
+
+for (const step of result.steps) {
+  console.log(
+    `turn ${step.turn}: ${step.toolCalls.length} tool(s), ${step.durationMs}ms`,
+  )
+  console.log(
+    `  usage: ${step.usage.inputTokens} in / ${step.usage.outputTokens} out`,
+  )
+}
+```
+
+Because the loop records every turn as it goes, tracing exporters are a formatter
+over data that already exists rather than new plumbing.
+
+## Coming next
+
+An async-iterator API for streaming (`for await (const event of agent.stream(…))`),
+plus trace exporters for JSON and OpenTelemetry.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/testing"
+    title="Testing"
+    description="Assert on event order in your own tests."
+  />
+  <Card
+    href="/docs/errors"
+    title="Errors"
+    description="What throws and what does not."
+  />
+</Cards>

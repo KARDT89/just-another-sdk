@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch cancels an in-flight run — no point paying for
+# CI on a commit that has already been superseded.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Turborepo needs this to be deterministic across runners.
+  TURBO_TELEMETRY_DISABLED: 1
+  DO_NOT_TRACK: 1
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Format
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # These two are the difference between "it compiles" and "it installs".
+      # publint catches a broken exports map; attw catches types that resolve for
+      # us but not for a consumer.
+      - name: Check package exports
+        run: pnpm --filter just-another-sdk check:exports
+
+      - name: Assert zero runtime dependencies
+        run: |
+          DEPS=$(node -p "
+            const pkg = require('./packages/core/package.json');
+            Object.keys(pkg.dependencies ?? {}).join(' ')
+          ")
+          if [ -n "$DEPS" ]; then
+            echo "::error::just-another-sdk must have zero runtime dependencies, found: $DEPS"
+            exit 1
+          fi
+          echo "✓ zero runtime dependencies"
+
+  # The published tarball is installed into a scratch project and imported, so a
+  # packaging mistake fails here rather than for the first person to `npm i`.
+  smoke-test-package:
+    name: Smoke test the tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter just-another-sdk build
+
+      - name: Pack
+        id: pack
+        working-directory: packages/core
+        run: echo "tarball=$(pwd)/$(npm pack --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Install the tarball in a clean project and import it
+        run: |
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y > /dev/null
+          npm pkg set type=module
+          npm i "${{ steps.pack.outputs.tarball }}" zod --silent
+
+          cat > check.mjs <<'EOF'
+          import { Agent, tool } from 'just-another-sdk'
+          import { openrouter } from 'just-another-sdk/providers'
+          import { mockProvider } from 'just-another-sdk/testing'
+          import * as z from 'zod'
+
+          const echo = tool({
+            name: 'echo',
+            description: 'Echo a message back.',
+            inputSchema: z.object({ message: z.string() }),
+            execute: ({ message }) => message,
+          })
+
+          // Exercises the whole loop: tool schema derivation, validation,
+          // execution, and the final answer — with no network.
+          const model = mockProvider([
+            { toolCalls: [{ toolName: 'echo', input: { message: 'hi' } }] },
+            { text: 'done' },
+          ])
+
+          const result = await new Agent({ name: 'smoke', model, tools: [echo] }).run('go')
+          if (result.text !== 'done') throw new Error(`unexpected output: ${result.text}`)
+          if (result.turns !== 2) throw new Error(`unexpected turns: ${result.turns}`)
+          if (typeof openrouter !== 'function') throw new Error('providers entry broken')
+
+          const definition = await echo.toDefinition()
+          if (definition.parameters.type !== 'object') throw new Error('schema derivation broken')
+
+          console.log('✓ ESM import, tool loop, and schema derivation all work')
+          EOF
+
+          node check.mjs
+
+      - name: Require the tarball to be dependency-free
+        run: |
+          cd /tmp/consumer
+          COUNT=$(node -p "
+            const tree = require('child_process').execSync('npm ls just-another-sdk --json', { encoding: 'utf8' });
+            const node = JSON.parse(tree).dependencies['just-another-sdk'];
+            Object.keys(node.dependencies ?? {}).length
+          ")
+          if [ "$COUNT" != "0" ]; then
+            echo "::error::the installed package pulled in $COUNT dependencies"
+            exit 1
+          fi
+          echo "✓ installs with no dependencies of its own"

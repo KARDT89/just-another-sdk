@@ -1,0 +1,139 @@
+---
+title: API reference
+description: Every export, grouped by entry point.
+---
+
+The package has three entry points. Anything not listed here is internal and may
+change in a patch release.
+
+## `just-another-sdk`
+
+### Agents
+
+| Export            | Kind     | Description                                                                             |
+| ----------------- | -------- | --------------------------------------------------------------------------------------- |
+| `Agent`           | class    | The agent. `new Agent(config)`, `.run()`, `.clone()`, `.withTools()`, `.toConfig()`     |
+| `run`             | function | `run(config, input, options)` — shorthand for a one-shot agent                          |
+| `runAgent`        | function | The loop itself, if you want it without the `Agent` wrapper                             |
+| `AGENT_DEFAULTS`  | const    | `{ maxTurns: 10, toolTimeoutMs: 30000, modelTimeoutMs: 120000, onToolError: 'return' }` |
+| `AgentConfig`     | type     | Constructor options — see [Agents](/docs/agents#configuration)                          |
+| `RunOptions`      | type     | Per-run options                                                                         |
+| `AgentInput`      | type     | `string \| ModelMessage[]`                                                              |
+| `ToolErrorPolicy` | type     | `'return' \| 'throw'`                                                                   |
+
+### Tools
+
+| Export                        | Kind     | Description                                                                        |
+| ----------------------------- | -------- | ---------------------------------------------------------------------------------- |
+| `tool`                        | function | Defines a tool. Overloaded for schema and no-argument forms                        |
+| `ToolRegistry`                | class    | Name-indexed view over an agent's tools                                            |
+| `Tool`, `AnyTool`             | type     | A defined tool                                                                     |
+| `ToolSpec`, `NullaryToolSpec` | type     | Arguments to `tool()`                                                              |
+| `ToolContext`                 | type     | Second argument to a handler: `runId`, `toolCallId`, `agentName`, `turn`, `signal` |
+| `ToolHandler`                 | type     | `(input, context) => output`                                                       |
+
+### Results
+
+| Export       | Kind     | Description                                        |
+| ------------ | -------- | -------------------------------------------------- |
+| `RunResult`  | type     | What `run()` resolves with                         |
+| `RunStep`    | type     | One turn: text, tool calls, results, usage, timing |
+| `StopReason` | type     | `'finish' \| 'max_turns'`                          |
+| `isComplete` | function | `result.stopReason === 'finish'`                   |
+
+### Events
+
+| Export                            | Kind     | Description                                      |
+| --------------------------------- | -------- | ------------------------------------------------ |
+| `consoleTracer`                   | function | Ready-made listener that prints a readable trace |
+| `ConsoleTracerOptions`            | type     | `verbose`, `color`, `write`, `maxValueLength`    |
+| `EventEmitter`                    | class    | The run's event bus                              |
+| `AgentEvent`                      | type     | Union of every event                             |
+| `AgentEventType`                  | type     | `'run.start' \| 'model.request' \| …`            |
+| `EventOfType<T>`                  | type     | Narrows `AgentEvent` by `type`                   |
+| `EventListener`                   | type     | `(event: AgentEvent) => void`                    |
+| `RunStartEvent` … `RunErrorEvent` | type     | Individual event shapes                          |
+
+### Errors
+
+| Export                          | Code                                        |
+| ------------------------------- | ------------------------------------------- |
+| `AgentError`                    | base class for all of the below             |
+| `ConfigurationError`            | `configuration_error`                       |
+| `AuthenticationError`           | `authentication_error`                      |
+| `RateLimitError`                | `rate_limit_error` — carries `retryAfterMs` |
+| `ProviderError`                 | `provider_error` — carries `status`         |
+| `NetworkError`                  | `network_error`                             |
+| `TimeoutError`                  | `timeout_error`                             |
+| `AbortError`                    | `aborted`                                   |
+| `InvalidToolInputError`         | `invalid_tool_input` — carries `issues`     |
+| `ToolExecutionError`            | `tool_execution_error`                      |
+| `ToolNotFoundError`             | `tool_not_found`                            |
+| `InvalidSchemaError`            | `invalid_schema`                            |
+| `isAgentError`                  | narrowing helper                            |
+| `AgentErrorCode`, `SchemaIssue` | types                                       |
+
+### Messages
+
+| Export                                                                            | Kind           | Description                    |
+| --------------------------------------------------------------------------------- | -------------- | ------------------------------ |
+| `userMessage`, `assistantMessage`, `toolMessage`, `textPart`                      | function       | Constructors                   |
+| `isTextPart`, `isToolCallPart`, `isToolResultPart`                                | function       | Narrowing                      |
+| `messageText`                                                                     | function       | Concatenated text of a message |
+| `addUsage`, `ZERO_USAGE`                                                          | function/const | Usage arithmetic               |
+| `ModelMessage`, `SystemMessage`, `UserMessage`, `AssistantMessage`, `ToolMessage` | type           | Message shapes                 |
+| `ContentPart`, `TextPart`, `ToolCallPart`, `ToolResultPart`                       | type           | Content shapes                 |
+| `Usage`, `MessageRole`                                                            | type           |                                |
+
+### Schema interop
+
+| Export                                                      | Kind     | Description                                  |
+| ----------------------------------------------------------- | -------- | -------------------------------------------- |
+| `validate`                                                  | function | Validate a value against any Standard Schema |
+| `resolveJsonSchema`                                         | function | Derive JSON Schema from a validator schema   |
+| `registerJsonSchemaConverter`                               | function | Teach the SDK a validator's converter        |
+| `isStandardSchema`                                          | function | Runtime guard                                |
+| `StandardSchemaV1`, `InferSchemaOutput`, `ValidationResult` | type     |                                              |
+| `JsonSchema`, `ObjectJsonSchema`                            | type     |                                              |
+
+### Provider contract
+
+Re-exported from the root so writing a provider needs only one import:
+`ModelProvider`, `ModelRequest`, `ModelResponse`, `ModelCallOptions`,
+`ModelStreamChunk`, `ToolDefinition`, `ToolChoice`, `FinishReason`,
+`ResponseFormat`, plus the helpers `textOf` and `toolCallsOf`.
+
+### Utilities
+
+| Export                                    | Description                                                 |
+| ----------------------------------------- | ----------------------------------------------------------- |
+| `createId`                                | Sortable prefixed id, e.g. `run_m9x2k1p_a7f3z9`             |
+| `redact`, `redactHeaders`, `redactString` | Secret redaction — see [Errors](/docs/errors#secret-safety) |
+
+## `just-another-sdk/providers`
+
+| Export                                                                              | Description                              |
+| ----------------------------------------------------------------------------------- | ---------------------------------------- |
+| `openrouter(modelId, options?)`                                                     | [OpenRouter](/docs/providers#openrouter) |
+| `openai(modelId, options?)`                                                         | OpenAI Chat Completions                  |
+| `compatible(modelId, options)`                                                      | Any OpenAI-compatible endpoint           |
+| `createOpenAICompatibleProvider(config)`                                            | The shared transport, for building on    |
+| `OpenRouterOptions`, `OpenAIOptions`, `CompatibleOptions`, `OpenAICompatibleConfig` | types                                    |
+
+## `just-another-sdk/testing`
+
+| Export                                                                              | Description                           |
+| ----------------------------------------------------------------------------------- | ------------------------------------- |
+| `mockProvider(script, options?)`                                                    | A scripted, offline provider          |
+| `collectEvents()`                                                                   | Records a run's events for assertions |
+| `MockProvider`, `MockTurn`, `MockToolCall`, `MockProviderOptions`, `EventCollector` | types                                 |
+
+See [Testing](/docs/testing) for usage.
+
+## Version policy
+
+While the package is `0.x`, minor versions may contain breaking changes; they are
+documented in the
+[changelog](https://github.com/KARDT89/sylo-sdk/blob/main/packages/core/CHANGELOG.md).
+New members are added to the `AgentEvent` and `AgentErrorCode` unions in minor
+releases, so switch on them with a `default` branch.

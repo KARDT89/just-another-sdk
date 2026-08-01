@@ -1,0 +1,162 @@
+---
+title: Examples
+description: Runnable projects in the repository.
+---
+
+Both examples live in the
+[repository](https://github.com/KARDT89/sylo-sdk/tree/main/examples) and run
+against a real model. Clone it, add a key, and go:
+
+```bash
+git clone https://github.com/KARDT89/sylo-sdk.git
+cd sylo-sdk
+pnpm install
+echo "OPENROUTER_API_KEY=sk-or-v1-..." > examples/.env
+```
+
+## 1 — Hello, agent
+
+The minimum viable agent: instructions, a model, one question. No tools, no
+streaming, no session.
+
+```bash
+pnpm example:hello
+```
+
+```ts title="examples/01-hello-agent/index.ts"
+import { Agent, isAgentError } from 'just-another-sdk'
+import { openrouter } from 'just-another-sdk/providers'
+
+try {
+  const agent = new Agent({
+    name: 'haiku-writer',
+    instructions: 'You write haiku. Reply with the poem only — no preamble.',
+    model: openrouter('anthropic/claude-opus-5'),
+  })
+
+  const result = await agent.run('Write a haiku about a zero-dependency SDK.')
+  console.log(result.output)
+} catch (error) {
+  if (isAgentError(error)) {
+    console.error(`✗ ${error.code}\n${error.message}`)
+    process.exit(1)
+  }
+  throw error
+}
+```
+
+Note the agent is constructed _inside_ the `try`: a missing API key is a
+`ConfigurationError` raised at construction, and it deserves the same friendly
+handling as a failed run.
+
+## 2 — Tools
+
+Everything you actually care about in production, in one file:
+
+- a typed tool whose handler input is inferred from its Zod schema
+- two tools called in parallel in a single turn
+- a third tool that **fails**, and an agent that recovers instead of crashing
+- the event stream, rendered by the built-in console tracer
+- a second turn that continues the same conversation
+
+```bash
+pnpm example:tools
+```
+
+```text
+── Turn 1 ────────────────────────────────────────────────────────
+▶ run_m9x2k1p  travel-assistant · anthropic/claude-opus-5
+  ↳ get_weather {"city":"Paris","unit":"celsius"}
+  ↳ get_time {"city":"Paris"}
+  ↳ get_air_quality {"city":"Paris"}
+    → {"city":"Paris","temperature":18,"unit":"celsius","summary":"clear"} 121ms
+    → {"city":"Paris","localTime":"2026-08-01T14:32:00Z"} 63ms
+    ✗ {"error":"air-quality upstream returned 503",…} 1ms
+✔ finish · 2 turns · 412 in / 63 out · 1.9s
+
+It's 18°C and clear in Paris, and the local time is 14:32.
+Air quality data is unavailable right now.
+
+── Turn 2 (same conversation) ────────────────────────────────────
+▶ run_m9x3f2q  travel-assistant · anthropic/claude-opus-5
+✔ finish · 1 turn · 498 in / 24 out · 0.8s
+
+No umbrella needed — it's clear.
+
+──────────────────────────────────────────────────────────────────
+Total across both turns: 910 in / 87 out tokens
+Recovered from 1 tool failure(s): get_air_quality
+```
+
+The last line is the point: a tool failed, and the run still produced a useful
+answer.
+
+## Patterns worth copying
+
+### A shared agent in a server route
+
+```ts title="lib/agent.ts"
+export const agent = new Agent({
+  name: 'support',
+  instructions: 'You are a support agent for Acme.',
+  model: openrouter('anthropic/claude-opus-5'),
+  tools: [lookupOrder],
+})
+```
+
+```ts title="app/api/chat/route.ts"
+import { agent } from '@/lib/agent'
+
+export async function POST(request: Request) {
+  const { message, history } = await request.json()
+
+  const result = await agent.run(message, {
+    messages: history,
+    signal: request.signal, // cancels if the client disconnects
+    timeoutMs: 60_000,
+  })
+
+  return Response.json({ reply: result.output, history: result.messages })
+}
+```
+
+One agent instance, created once, serving concurrent requests — safe because
+`Agent` holds no mutable state.
+
+### Per-user model tiers
+
+```ts
+const model = user.isPro
+  ? openrouter('anthropic/claude-opus-5')
+  : openrouter('anthropic/claude-haiku-4-5')
+
+const result = await agent.clone({ model }).run(prompt)
+```
+
+### Guarding an autonomous job
+
+```ts
+const result = await agent
+  .clone({ maxTurns: 5, onToolError: 'throw' })
+  .run(task, {
+    timeoutMs: 120_000,
+    onEvent: (event) => {
+      if (event.type === 'tool.end' && event.isError) logger.warn(event)
+    },
+  })
+
+if (result.stopReason !== 'finish') {
+  throw new Error(`agent did not converge: ${result.stopReason}`)
+}
+```
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/testing"
+    title="Testing"
+    description="Test all of this offline."
+  />
+  <Card href="/docs/api" title="API reference" description="Every export." />
+</Cards>

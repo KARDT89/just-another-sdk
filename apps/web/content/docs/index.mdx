@@ -1,0 +1,103 @@
+---
+title: Introduction
+description: A TypeScript agent SDK with zero runtime dependencies.
+---
+
+`just-another-sdk` is a TypeScript SDK for building LLM agents. You define an
+agent, give it tools, run the loop, and get a typed result.
+
+```ts
+import { Agent, tool } from 'just-another-sdk'
+import { openrouter } from 'just-another-sdk/providers'
+import * as z from 'zod'
+
+const agent = new Agent({
+  name: 'travel-assistant',
+  instructions: 'Use the tools available to you rather than guessing.',
+  model: openrouter('anthropic/claude-opus-5'),
+  tools: [
+    tool({
+      name: 'get_weather',
+      description: 'Get the current weather for a city.',
+      inputSchema: z.object({ city: z.string() }),
+      execute: async ({ city }) => ({ city, tempC: 18, summary: 'clear' }),
+    }),
+  ],
+})
+
+const result = await agent.run('What is the weather in Paris?')
+console.log(result.output)
+```
+
+## Why another one
+
+Agent frameworks demo well. Then you ship one, and the problems that actually
+cost you time turn out to be the unglamorous ones — a model that loops until
+your bill spikes, a tool exception that takes down a request, an API key in a CI
+log, a dependency tree you cannot audit, and no way to see what your agent did.
+
+This SDK treats those as the product rather than the appendix.
+
+<Cards>
+  <Card
+    title="Zero dependencies"
+    description="npm ls shows one package. Providers are plain fetch calls — no vendor SDK to keep in sync, nothing transitive to audit."
+  />
+  <Card
+    title="A loop that cannot hang"
+    description="Every exit path sets a stopReason. A model that calls tools forever costs you maxTurns requests, not your afternoon."
+  />
+  <Card
+    title="Failures stay recoverable"
+    description="A tool that throws becomes a tool result the model reads and works around, so the run finishes with an answer."
+  />
+  <Card
+    title="Your validator, not ours"
+    description="Zod, Valibot, ArkType — anything implementing Standard Schema. Handler input is typed from the schema."
+  />
+  <Card
+    title="Secrets never reach your logs"
+    description="An API key cannot appear in a thrown error, an event, or a trace. A test suite asserts it."
+  />
+  <Card
+    title="Observable by construction"
+    description="Tracing, streaming, and progress UIs all consume one event stream."
+  />
+</Cards>
+
+## Where to start
+
+<Cards>
+  <Card
+    href="/docs/installation"
+    title="Installation"
+    description="Install the package and set up a key."
+  />
+  <Card
+    href="/docs/quickstart"
+    title="Quick start"
+    description="A working agent with a tool, in about two minutes."
+  />
+  <Card
+    href="/docs/agents"
+    title="Agents"
+    description="How agents, runs, and tools fit together."
+  />
+  <Card
+    href="/docs/examples"
+    title="Examples"
+    description="Runnable projects in the repository."
+  />
+</Cards>
+
+## Requirements
+
+Node 20.19 or newer, or any runtime providing `fetch` and `AbortSignal` — Bun,
+Deno, Cloudflare Workers, and Vercel Edge all work. TypeScript is optional, but
+the API is designed around it.
+
+<Callout type="info">
+  This is a young project. Everything documented outside the **Coming next**
+  section is implemented and covered by tests. Pages under **Coming next** are
+  designed but not yet shipped, and say so at the top.
+</Callout>

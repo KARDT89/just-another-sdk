@@ -1,0 +1,235 @@
+---
+title: Agents
+description: Configuration, runs, and the three kinds of state.
+---
+
+## Three kinds of state
+
+Most agent code becomes unmaintainable for one reason: configuration,
+per-run state, and persisted history get mixed into a single mutable object. This
+SDK keeps them apart.
+
+|            | Holds                                    | Lifetime                                  |
+| ---------- | ---------------------------------------- | ----------------------------------------- |
+| `Agent`    | name, instructions, model, tools, limits | Created once, shared across every request |
+| `RunState` | messages, turn count, usage, steps       | One run                                   |
+| `Session`  | persisted conversation                   | Across runs _(coming next)_               |
+
+Because an `Agent` is immutable, one instance is safe to create at module scope
+and share across concurrent users:
+
+```ts title="lib/agent.ts"
+export const supportAgent = new Agent({
+  name: 'support',
+  instructions: 'You are a support agent for Acme.',
+  model: openrouter('anthropic/claude-opus-5'),
+  tools: [lookupOrder, refundOrder],
+})
+```
+
+```ts title="app/api/chat/route.ts"
+import { supportAgent } from '@/lib/agent'
+
+export async function POST(request: Request) {
+  const { message, history } = await request.json()
+  // Safe under concurrency: nothing here mutates the agent.
+  const result = await supportAgent.run(message, { messages: history })
+  return Response.json({ reply: result.output, history: result.messages })
+}
+```
+
+## Configuration
+
+<TypeTable
+  type={{
+    name: {
+      type: 'string',
+      description:
+        'Required. Identifies the agent in events, traces, and handoffs.',
+    },
+    model: {
+      type: 'ModelProvider',
+      description:
+        'Required. A bound model, e.g. openrouter("anthropic/claude-opus-5").',
+    },
+    instructions: {
+      type: 'string | (() => string | Promise<string>)',
+      description: 'The system prompt. A function is resolved once per run.',
+    },
+    tools: {
+      type: 'Tool[]',
+      description: 'Tools the model may call. Names must be unique.',
+    },
+    maxTurns: {
+      type: 'number',
+      default: '10',
+      description:
+        'Ceiling on model calls per run. Reaching it ends the run with stopReason "max_turns".',
+    },
+    onToolError: {
+      type: "'return' | 'throw'",
+      default: "'return'",
+      description:
+        'Whether a tool failure is fed back to the model or aborts the run.',
+    },
+    toolTimeoutMs: {
+      type: 'number',
+      default: '30000',
+      description: 'Per tool call. A tool can override it individually.',
+    },
+    modelTimeoutMs: {
+      type: 'number',
+      default: '120000',
+      description: 'Per model call.',
+    },
+    maxOutputTokens: {
+      type: 'number',
+      description: 'Passed through to the provider.',
+    },
+    temperature: {
+      type: 'number',
+      description: 'Passed through to the provider.',
+    },
+    toolChoice: {
+      type: "'auto' | 'required' | 'none' | { type: 'tool', name: string }",
+      description: 'Constrain whether and which tool the model must call.',
+    },
+    metadata: {
+      type: 'Record<string, string>',
+      description:
+        'Free-form tags for providers that support them, and for traces.',
+    },
+  }}
+/>
+
+### Dynamic instructions
+
+Pass a function when the prompt depends on something known only at run time. It
+is resolved once per run, so the agent itself stays immutable:
+
+```ts
+const agent = new Agent({
+  name: 'assistant',
+  model: openrouter('anthropic/claude-opus-5'),
+  instructions: () =>
+    `You are a helpful assistant. Today is ${new Date().toDateString()}.`,
+})
+```
+
+<Callout type="warn">
+  Do not interpolate untrusted user input into `instructions`. Anything in the
+  system prompt carries authority; user content belongs in the user turn, which
+  is where `run(input)` puts it.
+</Callout>
+
+## Running
+
+```ts
+const result = await agent.run('What is the weather in Paris?', {
+  messages: previousResult.messages, // continue a conversation
+  signal: controller.signal, // cancel the run
+  timeoutMs: 30_000, // deadline for the whole run
+  maxTurns: 4, // override the agent's ceiling for this run
+  onEvent: consoleTracer(), // observe it
+  metadata: { userId: 'u_123' },
+})
+```
+
+### The result
+
+```ts
+result.runId // 'run_m9x2k1p_a7f3z9' — appears in every event
+result.output // the answer
+result.text // raw final assistant text
+result.stopReason // 'finish' | 'max_turns'
+result.messages // full conversation, ready to pass back in
+result.steps // one entry per turn
+result.usage // summed across every model call
+result.turns // number of model calls
+result.durationMs
+result.modelId // the model that served the final turn
+```
+
+`run()` resolves only when the agent produced something. Cancellation, provider
+failures, and (under `onToolError: 'throw'`) tool failures reject instead — so a
+`RunResult` in hand always means you have an answer to work with.
+
+### Stop reasons
+
+```ts
+if (result.stopReason === 'max_turns') {
+  // The model was still calling tools when the ceiling was reached.
+  // The last assistant text is returned, but the task may be unfinished.
+}
+```
+
+Always branch on this in an autonomous pipeline. In an interactive chat it
+matters less, because the user will simply ask again.
+
+## Reuse and specialisation
+
+`clone()` returns a new agent with some configuration replaced, leaving the
+original untouched. This is the right way to specialise a shared agent per
+request:
+
+```ts
+// A cheaper model for free-tier users
+const cheap = supportAgent.clone({
+  model: openrouter('anthropic/claude-haiku-4-5'),
+})
+
+// Extra capability for an admin
+const admin = supportAgent.withTools(issueRefund, deleteAccount)
+
+// Stricter ceiling for a background job
+const batch = supportAgent.clone({ maxTurns: 3, onToolError: 'throw' })
+```
+
+## Inspecting an agent
+
+```ts
+agent.name // 'support'
+agent.modelId // 'anthropic/claude-opus-5'
+agent.toolNames // ['lookup_order', 'refund_order']
+agent.toConfig() // the resolved configuration, read-only
+```
+
+## Errors at construction time
+
+The constructor validates eagerly, so mistakes surface where you wrote them
+rather than on the first production request:
+
+```ts
+new Agent({ name: '', model }) // ConfigurationError: An agent needs a name.
+new Agent({ name: 'a', model: null }) // ConfigurationError: no valid model
+new Agent({ name: 'a', model, maxTurns: 0 }) // ConfigurationError: maxTurns must be at least 1
+new Agent({ name: 'a', model, tools: [a, a] }) // ConfigurationError: Two tools are both named "…"
+```
+
+## Functional shorthand
+
+For a one-shot call where an agent instance would not be reused:
+
+```ts
+import { run } from 'just-another-sdk'
+
+const result = await run(
+  { name: 'classifier', model: openrouter('anthropic/claude-haiku-4-5') },
+  'Classify this ticket as bug, feature, or question: …',
+)
+```
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/tools"
+    title="Tools"
+    description="Schemas, timeouts, concurrency, and failure handling."
+  />
+  <Card
+    href="/docs/events"
+    title="Events & tracing"
+    description="See what your agent did."
+  />
+</Cards>

@@ -1,0 +1,242 @@
+---
+title: Quick start
+description: A working agent that calls a tool, in about two minutes.
+---
+
+By the end of this page you will have an agent that decides to call a tool,
+receives a validated result, and answers using it — plus a readable trace of
+everything it did.
+
+Make sure you have [installed the package](/docs/installation) and set
+`OPENROUTER_API_KEY`.
+
+<Steps>
+
+<Step>
+### Define an agent
+
+An agent is a name, some instructions, and a model.
+
+```ts title="agent.ts"
+import { Agent } from 'just-another-sdk'
+import { openrouter } from 'just-another-sdk/providers'
+
+const agent = new Agent({
+  name: 'travel-assistant',
+  instructions: 'You help travellers. Be concise — two sentences at most.',
+  model: openrouter('anthropic/claude-opus-5'),
+})
+
+const result = await agent.run('What should I pack for Reykjavík in March?')
+console.log(result.output)
+```
+
+```bash
+node --env-file=.env agent.ts
+```
+
+An `Agent` is immutable configuration. It holds no conversation and no counters,
+so create it once — at module scope, in a server — and share it across every
+concurrent request.
+
+</Step>
+
+<Step>
+### Add a tool
+
+A tool is a name, a description the model reads to decide when to call it, a
+schema, and a function.
+
+```ts title="agent.ts"
+import { Agent, tool } from 'just-another-sdk'
+import { openrouter } from 'just-another-sdk/providers'
+import * as z from 'zod'
+
+const getWeather = tool({
+  name: 'get_weather',
+  description:
+    'Get the current weather for a city. Call this whenever the user asks ' +
+    'about conditions, temperature, or what to pack.',
+  inputSchema: z.object({
+    city: z.string().describe('City name, e.g. "Reykjavík"'),
+  }),
+  execute: async ({ city }) => {
+    //             ^^^^ typed as string, and already validated
+    const response = await fetch(
+      `https://wttr.in/${encodeURIComponent(city)}?format=j1`,
+    )
+    const data = await response.json()
+    return { city, tempC: Number(data.current_condition[0].temp_C) }
+  },
+})
+
+const agent = new Agent({
+  name: 'travel-assistant',
+  instructions: 'You help travellers. Use your tools rather than guessing.',
+  model: openrouter('anthropic/claude-opus-5'),
+  tools: [getWeather],
+})
+
+const result = await agent.run('What should I pack for Reykjavík in March?')
+console.log(result.output)
+```
+
+Two things happen for free here:
+
+- **`city` is typed as `string`** in the handler, inferred from the schema. Pass
+  the wrong field name and it is a compile error.
+- **Invalid arguments never reach your code.** If the model sends
+  `{ city: 123 }`, validation rejects it and the model gets a per-field error
+  message so it can correct its own call.
+
+<Callout type="tip">
+  Write the `description` for the model, not for your teammates. Stating *when*
+  to call a tool ("call this whenever the user asks about conditions") drives
+  most of the tool-selection quality you will observe.
+</Callout>
+</Step>
+
+<Step>
+### Watch what it does
+
+Pass the built-in tracer to see the run as it happens.
+
+```ts
+import { consoleTracer } from 'just-another-sdk'
+
+const result = await agent.run('What should I pack for Reykjavík in March?', {
+  onEvent: consoleTracer(),
+})
+```
+
+```ansi
+▶ run_m9x2k1p  travel-assistant · anthropic/claude-opus-5
+  ↳ get_weather {"city":"Reykjavík"}
+    → {"city":"Reykjavík","tempC":3} 214ms
+✔ finish · 2 turns · 412 in / 63 out · 1.9s
+```
+
+That is two model calls: one that decided to call the tool, and one that turned
+the result into an answer. `onEvent` is a plain function, so you can send the
+same events to your own logger or metrics instead — see
+[Events & tracing](/docs/events).
+
+</Step>
+
+<Step>
+### Read the result
+
+`run()` resolves with everything about the run, not just the text.
+
+```ts
+result.output // 'Pack layers and a waterproof shell — it is 3°C…'
+result.text // the same string; `output` becomes typed with structured output
+result.stopReason // 'finish'
+result.usage // { inputTokens: 412, outputTokens: 63, totalTokens: 475 }
+result.turns // 2
+result.durationMs // 1893
+result.steps // one entry per turn: text, tool calls, results, timing
+result.messages // the full conversation, ready to pass back in
+```
+
+Check `stopReason` before trusting `output` in anything autonomous. It is
+`'finish'` when the model answered, and `'max_turns'` when the run hit its ceiling
+while still calling tools — meaning the task may be unfinished.
+
+```ts
+if (result.stopReason === 'max_turns') {
+  logger.warn('agent did not converge', { runId: result.runId })
+}
+```
+
+</Step>
+
+<Step>
+### Continue the conversation
+
+The model API is stateless, so pass the previous messages back in.
+
+```ts
+const first = await agent.run('What should I pack for Reykjavík in March?')
+const second = await agent.run('And what about the shoes?', {
+  messages: first.messages,
+})
+```
+
+The agent's instructions are re-applied on every run, so you never have to
+manage the system message yourself.
+
+</Step>
+
+</Steps>
+
+## Handle failure
+
+Everything the SDK throws is an `AgentError` carrying a machine-readable `code`
+and a `retryable` flag:
+
+```ts
+import { isAgentError } from 'just-another-sdk'
+
+try {
+  await agent.run(prompt)
+} catch (error) {
+  if (isAgentError(error) && error.retryable) {
+    // rate limit, network blip, timeout — worth another attempt
+  }
+}
+```
+
+Note what is _not_ in that list: a tool throwing. By default a tool failure is
+fed back to the model as a tool result, so the model apologises or routes around
+it and your run still completes. See [Errors](/docs/errors).
+
+## Set your limits
+
+The defaults are deliberately conservative. Override them per agent:
+
+```ts
+const agent = new Agent({
+  name: 'travel-assistant',
+  model: openrouter('anthropic/claude-opus-5'),
+  tools: [getWeather],
+  maxTurns: 6, // ceiling on model calls per run (default 10)
+  toolTimeoutMs: 5_000, // per tool call (default 30s)
+  modelTimeoutMs: 60_000, // per model call (default 120s)
+  onToolError: 'return', // or 'throw' to abort the run (default 'return')
+})
+```
+
+And cancel any run with a standard `AbortSignal`:
+
+```ts
+const controller = new AbortController()
+setTimeout(() => controller.abort(), 10_000)
+
+await agent.run(prompt, { signal: controller.signal })
+```
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/agents"
+    title="Agents"
+    description="Configuration, cloning, and multi-turn state."
+  />
+  <Card
+    href="/docs/tools"
+    title="Tools"
+    description="Validation, timeouts, concurrency, failure handling."
+  />
+  <Card
+    href="/docs/testing"
+    title="Testing"
+    description="Test your agents offline with the mock provider."
+  />
+  <Card
+    href="/docs/examples"
+    title="Examples"
+    description="Runnable projects in the repository."
+  />
+</Cards>

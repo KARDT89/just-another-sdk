@@ -1,0 +1,92 @@
+---
+title: Memory & sessions
+description: Persisting conversations across runs, with pluggable storage.
+---
+
+<Callout type="warn">
+  **Not shipped yet.** Multi-turn conversations work today by passing `messages`
+  back in — see below. This page describes the persistence layer that removes
+  that bookkeeping.
+</Callout>
+
+## What works today
+
+The model API is stateless, and so is this SDK. Continue a conversation by
+handing the previous messages to the next run:
+
+```ts
+const first = await agent.run('My name is Ada.')
+const second = await agent.run('What is my name?', { messages: first.messages })
+```
+
+`result.messages` is the complete transcript, including the system message, so it
+round-trips exactly. Persist it wherever you already keep state:
+
+```ts
+await db.conversations.update(id, { messages: result.messages })
+```
+
+That is enough for a chat product. What it does not give you is context-window
+management, or a place for the agent to remember things across conversations.
+
+## Intended API
+
+```ts
+import { Agent } from 'just-another-sdk'
+import { sqliteSession } from 'just-another-sdk/sessions/sqlite'
+
+const agent = new Agent({
+  name: 'support',
+  model,
+  session: sqliteSession({ path: './sessions.db' }),
+})
+
+// The conversation is loaded and saved automatically
+await agent.run('My name is Ada.', { sessionId: 'user_123' })
+await agent.run('What is my name?', { sessionId: 'user_123' })
+```
+
+### Planned adapters
+
+| Adapter                    | Use                                    |
+| -------------------------- | -------------------------------------- |
+| `memorySession()`          | Tests and single-process apps          |
+| `fileSession({ dir })`     | Local development, CLI tools           |
+| `sqliteSession({ path })`  | Single-server deployments              |
+| `redisSession({ client })` | Serverless and multi-instance          |
+| Custom                     | Implement the `SessionStore` interface |
+
+### The storage interface
+
+Deliberately small, so any database can back it:
+
+```ts
+interface SessionStore {
+  load(sessionId: string): Promise<ModelMessage[] | undefined>
+  save(sessionId: string, messages: ModelMessage[]): Promise<void>
+  delete(sessionId: string): Promise<void>
+}
+```
+
+## Context management
+
+Long conversations eventually exceed the context window. The planned strategies,
+configured per agent:
+
+- **`trim`** — drop the oldest turns, keeping the system message and recent history.
+- **`summarize`** — replace old turns with a model-generated summary.
+- **`none`** — let the provider error, and handle it yourself.
+
+## Why it is separate
+
+The three kinds of state are kept apart on purpose:
+
+|            | Holds                  | Lifetime    |
+| ---------- | ---------------------- | ----------- |
+| `Agent`    | configuration          | Process     |
+| `RunState` | messages, turns, usage | One run     |
+| `Session`  | persisted conversation | Across runs |
+
+Sessions plug in at the run boundary — loading messages before the loop starts
+and saving them after it ends — so nothing in the agent runtime needs to change
+to support them.

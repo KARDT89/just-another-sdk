@@ -1,0 +1,85 @@
+---
+title: Structured output
+description: Typed, schema-validated results instead of a string.
+---
+
+<Callout type="warn">
+  **Not shipped yet.** `RunResult` is already generic over its output type and
+  `ResponseFormat` already exists on the provider contract, so this arrives
+  without a breaking change.
+</Callout>
+
+## Intended API
+
+```ts
+import * as z from 'zod'
+
+const Ticket = z.object({
+  category: z.enum(['bug', 'feature', 'question']),
+  severity: z.number().min(1).max(5),
+  summary: z.string(),
+})
+
+const agent = new Agent({
+  name: 'triage',
+  model,
+  outputSchema: Ticket,
+})
+
+const result = await agent.run(ticketText)
+
+result.output.category // 'bug' — typed, validated
+result.output.severity // number
+```
+
+`RunResult<TOutput>` is generic today and `output` is typed `string` by default,
+so adding `outputSchema` narrows it rather than changing the shape of the result.
+
+## Invalid output
+
+A model can produce JSON that does not match your schema. The planned behaviour,
+in order:
+
+1. **Provider-native constraints.** Where the provider supports JSON Schema
+   response formats, use them — the model is prevented from producing invalid
+   output rather than corrected afterwards.
+2. **Repair retry.** On a validation failure, send the validation errors back and
+   ask for a correction, up to a configurable number of attempts.
+3. **A useful error.** If repair fails, throw with the per-field issues and the
+   raw text, so you can see what the model actually said.
+
+```ts
+try {
+  const result = await agent.run(input)
+} catch (error) {
+  if (error instanceof InvalidOutputError) {
+    console.error(error.issues) // [{ path: ['severity'], message: 'Expected number' }]
+    console.error(error.rawText) // what the model actually produced
+  }
+}
+```
+
+## What works today
+
+Force a tool call and read its validated arguments. The tool's schema does the
+same job, and the input is already validated for you:
+
+```ts
+const extract = tool({
+  name: 'extract_ticket',
+  description: 'Record the structured fields of a support ticket.',
+  inputSchema: Ticket,
+  execute: (fields) => fields, // just hand them back
+})
+
+const result = await new Agent({ name: 'triage', model, tools: [extract] }).run(
+  text,
+  {
+    toolChoice: { type: 'tool', name: 'extract_ticket' },
+  },
+)
+
+const ticket = result.steps[0]?.toolResults[0]?.output as z.infer<typeof Ticket>
+```
+
+It is less elegant, but it is validated, typed at the edges, and available now.

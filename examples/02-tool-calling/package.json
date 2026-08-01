@@ -1,0 +1,20 @@
+{
+  "name": "example-tool-calling",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Tools, validation, parallel execution, failure recovery, and a live event trace.",
+  "scripts": {
+    "start": "node --env-file-if-exists=../.env --import tsx index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "just-another-sdk": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "tsx": "^4.20.6",
+    "typescript": "^6.0.3"
+  }
+}
