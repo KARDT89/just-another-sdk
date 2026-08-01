@@ -1,6 +1,6 @@
 {
   "name": "just-another-sdk",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "A TypeScript agent SDK with zero runtime dependencies. Define an agent, give it tools, run the loop, get a typed result.",
   "keywords": [
     "ai",
@@ -96,7 +96,6 @@
     "zod": "^4.4.3"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   }
 }
