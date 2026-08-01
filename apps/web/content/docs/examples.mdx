@@ -27,11 +27,14 @@ pnpm example:hello
 import { Agent, isAgentError } from 'just-another-sdk'
 import { openrouter } from 'just-another-sdk/providers'
 
+// Override with OPENROUTER_MODEL to try a different model without editing code.
+const MODEL = process.env['OPENROUTER_MODEL'] ?? 'openai/gpt-4o-mini'
+
 try {
   const agent = new Agent({
     name: 'haiku-writer',
     instructions: 'You write haiku. Reply with the poem only — no preamble.',
-    model: openrouter('anthropic/claude-opus-5'),
+    model: openrouter(MODEL),
   })
 
   const result = await agent.run('Write a haiku about a zero-dependency SDK.')
@@ -65,7 +68,7 @@ pnpm example:tools
 
 ```text
 ── Turn 1 ────────────────────────────────────────────────────────
-▶ run_m9x2k1p  travel-assistant · anthropic/claude-opus-5
+▶ run_m9x2k1p  travel-assistant · openai/gpt-4o-mini
   ↳ get_weather {"city":"Paris","unit":"celsius"}
   ↳ get_time {"city":"Paris"}
   ↳ get_air_quality {"city":"Paris"}
@@ -78,7 +81,7 @@ It's 18°C and clear in Paris, and the local time is 14:32.
 Air quality data is unavailable right now.
 
 ── Turn 2 (same conversation) ────────────────────────────────────
-▶ run_m9x3f2q  travel-assistant · anthropic/claude-opus-5
+▶ run_m9x3f2q  travel-assistant · openai/gpt-4o-mini
 ✔ finish · 1 turn · 498 in / 24 out · 0.8s
 
 No umbrella needed — it's clear.

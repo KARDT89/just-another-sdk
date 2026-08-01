@@ -19,6 +19,9 @@ import { Agent, consoleTracer, isAgentError, tool } from 'just-another-sdk'
 import { openrouter } from 'just-another-sdk/providers'
 import * as z from 'zod'
 
+// Override with OPENROUTER_MODEL to try a different model without editing code.
+const MODEL = process.env['OPENROUTER_MODEL'] ?? 'openai/gpt-4o-mini'
+
 /* ── Tools ───────────────────────────────────────────────────────────────── */
 
 const getWeather = tool({
@@ -80,7 +83,7 @@ try {
     instructions:
       'You help travellers. Use the tools available to you rather than guessing. ' +
       'Be concise: two sentences at most unless asked for detail.',
-    model: openrouter('anthropic/claude-opus-5'),
+    model: openrouter(MODEL),
     tools: [getWeather, getTime, getAirQuality],
     maxTurns: 6,
   })

@@ -5,8 +5,8 @@ description: Test agents offline and deterministically, with no API key and no b
 
 Agent tests that hit a real model are slow, flaky, and expensive, so they end up
 not being written. `just-another-sdk/testing` ships the helpers to avoid that —
-the same ones the SDK's own 64-test suite uses, which is why it runs in about
-250ms.
+the same ones the SDK's own 66 offline tests use, which is why they run in about
+300ms with no key and no network.
 
 ```bash
 # nothing to install — it is part of the package
@@ -248,25 +248,41 @@ await expect(agent.run('go')).rejects.toMatchObject({
 
 ## Should you ever test against a real model?
 
-Yes — but keep it out of the unit suite. Put one or two live tests behind an
-environment check so CI stays fast and deterministic:
+Yes — but keep it in a separate suite, gated on a key being present, so CI stays
+fast and deterministic:
 
 ```ts
-const live = process.env.OPENROUTER_API_KEY ? it : it.skip
-
-live(
-  'works against a real model',
-  async () => {
+// The whole suite disappears when there is no key.
+describe.skipIf(!process.env.OPENROUTER_API_KEY)('live', () => {
+  it('round-trips a real tool call', async () => {
     const agent = new Agent({
       name: 'live',
-      model: openrouter('anthropic/claude-haiku-4-5'),
+      model: openrouter('openai/gpt-4o-mini'), // cheapest tool-capable model
+      tools: [getWeather],
+      maxOutputTokens: 128,
     })
-    const result = await agent.run('Reply with the single word: ok')
-    expect(result.text.toLowerCase()).toContain('ok')
-  },
-  30_000,
-)
+
+    const result = await agent.run('What is the weather in Paris?')
+    expect(result.stopReason).toBe('finish')
+    expect(result.usage.inputTokens).toBeGreaterThan(0)
+  }, 60_000) // real calls need a real timeout
+})
 ```
+
+<Callout type="tip">
+  This is worth the effort. A mock provider proves the *loop* is correct; only a
+  real model proves the *wire format* is — request translation, tool-call
+  round-tripping, and provider error mapping. This SDK's own live suite caught a
+  bug that all 66 offline tests missed: a run-level timeout was being reported
+  as a network error, because real `fetch` rejects with the abort **reason**
+  object while the mock rejected with a generic `AbortError`.
+</Callout>
+
+The SDK's own version of this is
+[`packages/core/test/live.test.ts`](https://github.com/KARDT89/sylo-sdk/blob/main/packages/core/test/live.test.ts) —
+12 tests covering parallel tool calls, failure recovery, forced tool choice,
+`maxTurns`, authentication failure, cancellation, and multi-turn context. Total
+cost per run is a fraction of a cent.
 
 ## Next
 

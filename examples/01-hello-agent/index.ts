@@ -11,13 +11,16 @@
 import { Agent, isAgentError } from 'just-another-sdk'
 import { openrouter } from 'just-another-sdk/providers'
 
+// Override with OPENROUTER_MODEL to try a different model without editing code.
+const MODEL = process.env['OPENROUTER_MODEL'] ?? 'openai/gpt-4o-mini'
+
 try {
   // Constructed inside the try: a missing API key is a ConfigurationError raised
   // here, and it deserves the same friendly handling as a failed run.
   const agent = new Agent({
     name: 'haiku-writer',
     instructions: 'You write haiku. Reply with the poem only — no preamble, no explanation.',
-    model: openrouter('anthropic/claude-opus-5'),
+    model: openrouter(MODEL),
   })
 
   const result = await agent.run('Write a haiku about a zero-dependency SDK.')

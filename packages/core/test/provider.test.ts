@@ -273,6 +273,55 @@ describe('error mapping', () => {
       retryable: true,
     })
   })
+
+  /**
+   * Regression: a whole-run `timeoutMs` used to surface as `network_error`.
+   *
+   * The runner aborts its signal with a `TimeoutError` as the reason, and real
+   * `fetch` rejects with that reason object rather than a generic `AbortError`.
+   * Because its `name` is `'TimeoutError'`, the abort-shape check missed it and
+   * the caller was told to check their network connection.
+   *
+   * This `fetch` double reproduces the real semantics — reject with
+   * `signal.reason` — which is what makes the test meaningful.
+   */
+  it('reports a run-level timeout as timeout_error, not network_error', async () => {
+    const fetchMock: typeof fetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal
+        if (!signal) return
+        signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true })
+      })
+
+    const agent = new Agent({
+      name: 'a',
+      model: openrouter('m', { apiKey: SECRET, fetch: fetchMock }),
+    })
+
+    await expect(agent.run('go', { timeoutMs: 50 })).rejects.toMatchObject({
+      code: 'timeout_error',
+    })
+  })
+
+  it('reports caller cancellation as aborted, not network_error', async () => {
+    const fetchMock: typeof fetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal
+        if (!signal) return
+        signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true })
+      })
+
+    const controller = new AbortController()
+    const agent = new Agent({
+      name: 'a',
+      model: openrouter('m', { apiKey: SECRET, fetch: fetchMock }),
+    })
+
+    const promise = agent.run('go', { signal: controller.signal })
+    setTimeout(() => controller.abort(), 20)
+
+    await expect(promise).rejects.toMatchObject({ code: 'aborted' })
+  })
 })
 
 describe('configuration', () => {

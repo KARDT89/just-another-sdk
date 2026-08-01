@@ -61,7 +61,11 @@ package README: [`packages/core`](./packages/core/README.md)
 packages/core/     the SDK, published as `just-another-sdk`
 apps/web/          landing page + documentation (Next.js, Fumadocs, shadcn/ui)
 examples/          runnable example projects
+docs/DELTA.md      what is built, what is not, and what happens next
 ```
+
+New here? [`docs/DELTA.md`](./docs/DELTA.md) is the fastest way to see the current
+state of the project and where it is going.
 
 ## Development
 

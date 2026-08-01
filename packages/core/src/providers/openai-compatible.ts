@@ -1,4 +1,5 @@
 import {
+  AgentError,
   AuthenticationError,
   ConfigurationError,
   NetworkError,
@@ -416,6 +417,13 @@ function parseRetryAfter(header: string | null): number | undefined {
 }
 
 function toTransportError(cause: unknown, providerId: string, options: ModelCallOptions): Error {
+  // `fetch` rejects with the abort *reason* itself when one was supplied, so a
+  // run-level timeout or an explicit cancellation arrives here already correctly
+  // typed. It must be passed through untouched: its `name` is `TimeoutError`, not
+  // `AbortError`, so the shape check below would misclassify it as a network
+  // failure and tell the caller to check their connectivity.
+  if (cause instanceof AgentError) return cause
+
   const aborted = isAbortLike(cause)
 
   if (aborted && options.signal?.aborted) {
