@@ -17,7 +17,7 @@ export const docsContentRoute = '/llms.mdx/docs'
 
 export const gitConfig = {
   user: 'KARDT89',
-  repo: 'sylo-sdk',
+  repo: 'just-another-sdk',
   branch: 'main',
 }
 
@@ -27,6 +27,15 @@ export const links = {
   docs: docsRoute,
   quickstart: `${docsRoute}/quickstart`,
 }
+
+/**
+ * Where the `.mdx` files live on GitHub, used by each page's "edit this page"
+ * link. The `apps/web/` prefix matters: this is a monorepo, so the content is not
+ * at the repository root the way a standalone Fumadocs app would have it.
+ */
+export const docsSourceUrl =
+  `https://github.com/${gitConfig.user}/${gitConfig.repo}` +
+  `/blob/${gitConfig.branch}/apps/web/content/docs`
 
 export const installCommands = [
   { label: 'pnpm', command: `pnpm add ${packageName}` },

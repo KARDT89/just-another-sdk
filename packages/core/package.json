@@ -18,11 +18,11 @@
   "author": "Tamal Sarkar",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KARDT89/sylo-sdk.git",
+    "url": "git+https://github.com/KARDT89/just-another-sdk.git",
     "directory": "packages/core"
   },
-  "homepage": "https://github.com/KARDT89/sylo-sdk#readme",
-  "bugs": "https://github.com/KARDT89/sylo-sdk/issues",
+  "homepage": "https://github.com/KARDT89/just-another-sdk#readme",
+  "bugs": "https://github.com/KARDT89/just-another-sdk/issues",
   "type": "module",
   "sideEffects": false,
   "engines": {

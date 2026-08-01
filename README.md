@@ -30,10 +30,6 @@ const result = await agent.run('What is the weather in Paris?')
 console.log(result.output) // "It's 18°C and clear in Paris."
 ```
 
-> [!NOTE]
-> This repository is named `sylo-sdk`; the package publishes as
-> `just-another-sdk`.
-
 ## Why
 
 Agent frameworks demo well. Then you ship one, and the problems that cost you
