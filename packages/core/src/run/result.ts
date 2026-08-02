@@ -22,6 +22,19 @@ export type StopReason =
 
 /** One model call plus any tool work it triggered. The unit of a trace. */
 export interface RunStep {
+  /**
+   * Why this model call was made.
+   * - `'turn'`   — an ordinary loop turn.
+   * - `'repair'` — a re-ask after the final answer failed the agent's
+   *   `outputSchema`.
+   *
+   * Repairs are recorded because they cost tokens and can be served by a
+   * fallback model, but they are not loop turns: `result.turns` counts `'turn'`
+   * steps only, so `maxTurns` stays the ceiling it claims to be. A repair
+   * carries the `turn` number of the answer it is repairing, so steps still
+   * group by exchange.
+   */
+  readonly kind: 'turn' | 'repair'
   /** 1-based turn number within the run. */
   readonly turn: number
   /** Text the model produced this turn (may be empty on a pure tool turn). */

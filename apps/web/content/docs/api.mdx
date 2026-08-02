@@ -10,17 +10,17 @@ change in a patch release.
 
 ### Agents
 
-| Export            | Kind     | Description                                                                                                                                               |
-| ----------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Agent`           | class    | `new Agent(config)`, `.run()`, `.stream()`, `.session()`, `.resumable()`, `.resume()`, `.clone()`, `.withTools()`                                         |
-| `AgentSession`    | type     | What `.session(id)` returns: `run`, `stream`, `messages()`, `pop()`, `clear()`, `store`                                                                   |
-| `run`             | function | `run(config, input, options)` — shorthand for a one-shot agent                                                                                            |
-| `runAgent`        | function | The loop itself, if you want it without the `Agent` wrapper                                                                                               |
-| `AGENT_DEFAULTS`  | const    | `maxTurns: 10`, `toolTimeoutMs: 30000`, `modelTimeoutMs: 120000`, `onToolError: 'return'`, `maxRetries: 2`, `retryDelayMs: 250`, `maxRetryDelayMs: 10000` |
-| `AgentConfig`     | type     | Constructor options — see [Agents](/docs/agents#configuration)                                                                                            |
-| `RunOptions`      | type     | Per-run options                                                                                                                                           |
-| `AgentInput`      | type     | `string \| ModelMessage[]`                                                                                                                                |
-| `ToolErrorPolicy` | type     | `'return' \| 'throw'`                                                                                                                                     |
+| Export            | Kind     | Description                                                                                                                                                                      |
+| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Agent`           | class    | `new Agent(config)`, `.run()`, `.stream()`, `.session()`, `.resumable()`, `.resume()`, `.clone()`, `.withTools()`                                                                |
+| `AgentSession`    | type     | What `.session(id)` returns: `run`, `stream`, `messages()`, `pop()`, `clear()`, `store`                                                                                          |
+| `run`             | function | `run(config, input, options)` — shorthand for a one-shot agent                                                                                                                   |
+| `runAgent`        | function | The loop itself, if you want it without the `Agent` wrapper                                                                                                                      |
+| `AGENT_DEFAULTS`  | const    | `maxTurns: 10`, `toolTimeoutMs: 30000`, `modelTimeoutMs: 120000`, `onToolError: 'return'`, `maxRetries: 2`, `retryDelayMs: 250`, `maxRetryDelayMs: 10000`, `maxOutputRetries: 1` |
+| `AgentConfig`     | type     | Constructor options — see [Agents](/docs/agents#configuration)                                                                                                                   |
+| `RunOptions`      | type     | Per-run options                                                                                                                                                                  |
+| `AgentInput`      | type     | `string \| ModelMessage[]`                                                                                                                                                       |
+| `ToolErrorPolicy` | type     | `'return' \| 'throw'`                                                                                                                                                            |
 
 ### Tools
 
@@ -35,12 +35,12 @@ change in a patch release.
 
 ### Results
 
-| Export       | Kind     | Description                                                   |
-| ------------ | -------- | ------------------------------------------------------------- |
-| `RunResult`  | type     | What `run()` resolves with                                    |
-| `RunStep`    | type     | One turn: text, tool calls, results, usage, timing, `modelId` |
-| `StopReason` | type     | `'finish' \| 'max_turns'`                                     |
-| `isComplete` | function | `result.stopReason === 'finish'`                              |
+| Export       | Kind     | Description                                                                 |
+| ------------ | -------- | --------------------------------------------------------------------------- |
+| `RunResult`  | type     | What `run()` resolves with                                                  |
+| `RunStep`    | type     | One model call: `kind`, text, tool calls, results, usage, timing, `modelId` |
+| `StopReason` | type     | `'finish' \| 'max_turns'`                                                   |
+| `isComplete` | function | `result.stopReason === 'finish'`                                            |
 
 ### Streaming
 
@@ -115,29 +115,31 @@ See [Errors → Retries](/docs/errors#retries).
 | `RunStartEvent` … `RunErrorEvent` | type     | Individual event shapes                                  |
 | `ModelRetryEvent`                 | type     | `attempt`, `maxAttempts`, `delayMs`, `discardedText`     |
 | `ModelFallbackEvent`              | type     | `fromModelId`, `toModelId`, `index`, `error`             |
+| `OutputInvalidEvent`              | type     | `attempt`, `maxAttempts`, `issues`, `repairing`          |
 | `SessionLoadEvent`                | type     | `sessionId`, `messageCount`, `droppedCount`, `truncated` |
 | `SessionSummarizeEvent`           | type     | `coveredCount`, `foldedCount`, `keptCount`, `error?`     |
 | `SessionSaveEvent`                | type     | `sessionId`, `appendedCount`                             |
 
 ### Errors
 
-| Export                          | Code                                        |
-| ------------------------------- | ------------------------------------------- |
-| `AgentError`                    | base class for all of the below             |
-| `ConfigurationError`            | `configuration_error`                       |
-| `AuthenticationError`           | `authentication_error`                      |
-| `RateLimitError`                | `rate_limit_error` — carries `retryAfterMs` |
-| `ProviderError`                 | `provider_error` — carries `status`         |
-| `NetworkError`                  | `network_error`                             |
-| `TimeoutError`                  | `timeout_error`                             |
-| `AbortError`                    | `aborted`                                   |
-| `InvalidToolInputError`         | `invalid_tool_input` — carries `issues`     |
-| `ToolExecutionError`            | `tool_execution_error`                      |
-| `ToolNotFoundError`             | `tool_not_found`                            |
-| `InvalidSchemaError`            | `invalid_schema`                            |
-| `isAgentError`                  | narrowing helper                            |
-| `toAgentError`                  | wraps any thrown value as an `AgentError`   |
-| `AgentErrorCode`, `SchemaIssue` | types                                       |
+| Export                          | Code                                                       |
+| ------------------------------- | ---------------------------------------------------------- |
+| `AgentError`                    | base class for all of the below                            |
+| `ConfigurationError`            | `configuration_error`                                      |
+| `AuthenticationError`           | `authentication_error`                                     |
+| `RateLimitError`                | `rate_limit_error` — carries `retryAfterMs`                |
+| `ProviderError`                 | `provider_error` — carries `status`                        |
+| `NetworkError`                  | `network_error`                                            |
+| `TimeoutError`                  | `timeout_error`                                            |
+| `AbortError`                    | `aborted`                                                  |
+| `InvalidToolInputError`         | `invalid_tool_input` — carries `issues`                    |
+| `ToolExecutionError`            | `tool_execution_error`                                     |
+| `ToolNotFoundError`             | `tool_not_found`                                           |
+| `InvalidSchemaError`            | `invalid_schema`                                           |
+| `InvalidOutputError`            | `invalid_output` — carries `issues`, `rawText`, `attempts` |
+| `isAgentError`                  | narrowing helper                                           |
+| `toAgentError`                  | wraps any thrown value as an `AgentError`                  |
+| `AgentErrorCode`, `SchemaIssue` | types                                                      |
 
 ### Messages
 
@@ -153,14 +155,15 @@ See [Errors → Retries](/docs/errors#retries).
 
 ### Schema interop
 
-| Export                                                      | Kind     | Description                                  |
-| ----------------------------------------------------------- | -------- | -------------------------------------------- |
-| `validate`                                                  | function | Validate a value against any Standard Schema |
-| `resolveJsonSchema`                                         | function | Derive JSON Schema from a validator schema   |
-| `registerJsonSchemaConverter`                               | function | Teach the SDK a validator's converter        |
-| `isStandardSchema`                                          | function | Runtime guard                                |
-| `StandardSchemaV1`, `InferSchemaOutput`, `ValidationResult` | type     |                                              |
-| `JsonSchema`, `ObjectJsonSchema`                            | type     |                                              |
+| Export                                                      | Kind     | Description                                        |
+| ----------------------------------------------------------- | -------- | -------------------------------------------------- |
+| `validate`                                                  | function | Validate a value against any Standard Schema       |
+| `resolveJsonSchema`                                         | function | Derive JSON Schema from a validator schema         |
+| `SchemaSubject`                                             | type     | Whose schema is being converted, for error wording |
+| `registerJsonSchemaConverter`                               | function | Teach the SDK a validator's converter              |
+| `isStandardSchema`                                          | function | Runtime guard                                      |
+| `StandardSchemaV1`, `InferSchemaOutput`, `ValidationResult` | type     |                                                    |
+| `JsonSchema`, `ObjectJsonSchema`                            | type     |                                                    |
 
 ### Provider contract
 

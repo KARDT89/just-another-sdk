@@ -248,6 +248,36 @@ it('surfaces a provider failure as a typed error', async () => {
 })
 ```
 
+### Structured output, including the repair
+
+A [malformed-then-valid](/docs/structured-output) script _is_ the repair path —
+no extra mock capability needed:
+
+````ts
+it('repairs an answer that failed the schema', async () => {
+  const model = mockProvider(
+    [
+      { text: 'Sure! ```json\n{"severity":"high","summary":"x"}\n```' },
+      { text: '{"severity":4,"summary":"x"}' },
+    ],
+    { onExhausted: 'throw' }, // fails loudly if a third call happens
+  )
+
+  const result = await new Agent({
+    name: 'test',
+    model,
+    outputSchema: z.object({ severity: z.number(), summary: z.string() }),
+  }).run('go')
+
+  expect(result.output.severity).toBe(4)
+  expect(result.steps.map((s) => s.kind)).toEqual(['turn', 'repair'])
+  expect(result.turns).toBe(1) // a repair is not a turn
+})
+````
+
+Drop `maxOutputRetries: 0` in to assert the failure instead — it rejects with an
+`InvalidOutputError` carrying `issues` and `rawText`.
+
 ## Testing a provider
 
 Providers accept an injected `fetch`, so you can exercise the real translation

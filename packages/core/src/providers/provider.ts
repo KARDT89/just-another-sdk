@@ -64,6 +64,21 @@ export interface ResponseFormat {
   readonly type: 'json'
   readonly schema?: ObjectJsonSchema
   readonly name?: string
+  /**
+   * Ask the vendor to *guarantee* the schema rather than merely aim for it.
+   * Default `false`.
+   *
+   * Off by default because OpenAI's strict mode rejects any schema that does not
+   * set `additionalProperties: false` and mark every property `required`, and no
+   * validator's JSON Schema output guarantees either — a Zod schema with one
+   * optional field would fail the request outright instead of producing a
+   * slightly-loose one. Non-strict `json_schema` still constrains the model
+   * hard, and the runtime validates the answer regardless.
+   *
+   * Turn it on by passing an `outputJsonSchema` that already satisfies those
+   * rules.
+   */
+  readonly strict?: boolean
 }
 
 export interface ModelCallOptions {

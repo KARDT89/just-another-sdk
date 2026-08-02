@@ -135,6 +135,7 @@ Every event carries `id`, `timestamp`, `runId`, and `agentName`.
 | `text.delta`     | Streamed runs only                       | `delta`                                                       |
 | `model.retry`    | A failed call will be attempted again    | `attempt`, `maxAttempts`, `error`, `delayMs`, `discardedText` |
 | `model.fallback` | The chain moved to the next provider     | `fromModelId`, `toModelId`, `index`, `error`                  |
+| `output.invalid` | An answer failed `outputSchema`          | `turn`, `attempt`, `maxAttempts`, `issues`, `repairing`       |
 
 For a tool-using run the order is deterministic:
 
@@ -160,6 +161,21 @@ run.finish
 
 `model.request` fires **once per turn**, not once per attempt — retries and
 fallbacks announce themselves with their own events instead.
+
+A run with an [`outputSchema`](/docs/structured-output) emits no `text.delta` at
+all, and appends its own validation pass after the loop:
+
+```text
+run.start
+  model.request → model.response
+  output.invalid                 (repairing: true)
+  model.request → model.response (the repair)
+run.finish
+```
+
+`output.invalid` fires on **every** failed attempt, including the last one —
+unlike `model.retry`, which only fires when another attempt is coming. The final
+failure is the one worth seeing in a trace, because the run is about to throw.
 
 A run using a [session](/docs/sessions) brackets that sequence with two more:
 

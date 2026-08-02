@@ -78,12 +78,31 @@ export class RunState {
     this.messageLog.push(...messages)
   }
 
-  /** Records a completed turn: its step, its usage, and the serving model. */
-  completeTurn(step: RunStep): void {
-    this.stepLog.push(step)
+  /**
+   * Records a completed turn: its step, its usage, and the serving model.
+   *
+   * `kind` is filled in here rather than at the call site so that the loop body
+   * stays literal — the loop only ever produces turns.
+   */
+  completeTurn(step: Omit<RunStep, 'kind'>): void {
+    this.stepLog.push({ ...step, kind: 'turn' })
     this.usageTotal = addUsage(this.usageTotal, step.usage)
     this.lastModelId = step.modelId
     this.turnCount += 1
+  }
+
+  /**
+   * Records an output-repair call: its step and its cost, but **not** a turn.
+   *
+   * A repair is a real model call, so leaving it out would make `usage` wrong
+   * and make a fallback during repair invisible. It is not a loop turn, so
+   * counting it would push `result.turns` past the `maxTurns` the config
+   * promises. See {@link RunStep.kind}.
+   */
+  completeRepair(step: Omit<RunStep, 'kind'>): void {
+    this.stepLog.push({ ...step, kind: 'repair' })
+    this.usageTotal = addUsage(this.usageTotal, step.usage)
+    this.lastModelId = step.modelId
   }
 
   /**

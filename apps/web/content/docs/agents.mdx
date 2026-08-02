@@ -60,6 +60,22 @@ export async function POST(request: Request) {
       type: 'Tool[]',
       description: 'Tools the model may call. Names must be unique.',
     },
+    outputSchema: {
+      type: 'StandardSchemaV1',
+      description:
+        'Makes result.output a validated object instead of a string, typed from the schema. See Structured output.',
+    },
+    outputJsonSchema: {
+      type: 'ObjectJsonSchema',
+      description:
+        'Send this JSON Schema to the model rather than deriving one from outputSchema.',
+    },
+    maxOutputRetries: {
+      type: 'number',
+      default: '1',
+      description:
+        'Repair attempts after a final answer fails outputSchema. Additive to maxRetries, never multiplicative.',
+    },
     maxTurns: {
       type: 'number',
       default: '10',

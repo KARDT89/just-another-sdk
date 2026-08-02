@@ -51,12 +51,12 @@ import type { AgentConfig, AgentInput, RunOptions } from './types.js'
  * console.log(result.output)
  * ```
  */
-export class Agent {
+export class Agent<TOutput = string> {
   readonly name: string
-  private readonly config: AgentConfig
+  private readonly config: AgentConfig<TOutput>
   private readonly registry: ToolRegistry
 
-  constructor(config: AgentConfig) {
+  constructor(config: AgentConfig<TOutput>) {
     if (!config.name || config.name.trim().length === 0) {
       throw new ConfigurationError('An agent needs a name.', {
         hint: 'The name identifies the agent in events, traces, and handoffs.',
@@ -107,12 +107,16 @@ export class Agent {
    * const first = await agent.run('My name is Ada.')
    * const second = await agent.run('What is my name?', { messages: first.messages })
    * ```
+   *
+   * With an `outputSchema` on the agent, `result.output` is the validated object
+   * and `T` is inferred from the schema — you do not write it.
+   *
+   * The explicit `T` exists for the case where you assert the type yourself
+   * rather than declaring a schema, and it overrides the agent's own. Nothing
+   * about the run changes — without a schema there is no validation either way.
    */
-  async run<TOutput = string>(
-    input: AgentInput,
-    options: RunOptions = {},
-  ): Promise<RunResult<TOutput>> {
-    return runAgent<TOutput>(this.config, input, options)
+  async run<T = TOutput>(input: AgentInput, options: RunOptions = {}): Promise<RunResult<T>> {
+    return runAgent<T>(this.config, input, options)
   }
 
   /**
@@ -135,11 +139,15 @@ export class Agent {
    * Providers that do not implement `stream()` still work: their answer arrives
    * as a single `text.delta`, so consuming code needs no special case.
    *
+   * With an `outputSchema` there are **no** `text.delta` events at all — the
+   * model's only text is the JSON object, and half an object is not something a
+   * UI can render. Awaiting the stream still gives you the validated result.
+   *
    * Deliberately **not** `async` — `await agent.stream(x)` must give you a
    * `RunResult`, not a promise of a stream.
    */
-  stream<TOutput = string>(input: AgentInput, options: RunOptions = {}): StreamedRun<TOutput> {
-    return streamAgent<TOutput>(this.config, input, options)
+  stream<T = TOutput>(input: AgentInput, options: RunOptions = {}): StreamedRun<T> {
+    return streamAgent<T>(this.config, input, options)
   }
 
   /**
@@ -162,18 +170,18 @@ export class Agent {
    * Servers usually want `agent.run(input, { sessionId })` instead, since the id
    * arrives with the request. Both take the same path through the runtime.
    */
-  session(sessionId: string): AgentSession {
+  session(sessionId: string): AgentSession<TOutput> {
     const store = this.config.session ?? defaultSessionStore(this.config)
 
     return {
       sessionId,
       store,
 
-      run: <TOutput = string>(input: AgentInput, options: RunOptions = {}) =>
-        this.run<TOutput>(input, { ...options, sessionId }),
+      run: <T = TOutput>(input: AgentInput, options: RunOptions = {}) =>
+        this.run<T>(input, { ...options, sessionId }),
 
-      stream: <TOutput = string>(input: AgentInput, options: RunOptions = {}) =>
-        this.stream<TOutput>(input, { ...options, sessionId }),
+      stream: <T = TOutput>(input: AgentInput, options: RunOptions = {}) =>
+        this.stream<T>(input, { ...options, sessionId }),
 
       messages: (options?: LoadOptions) => store.load(sessionId, options),
 
@@ -217,11 +225,8 @@ export class Agent {
    * agent has none. In-memory is correct for one process and silently wrong
    * behind a load balancer; use `redisStreamStore` there.
    */
-  resumable<TOutput = string>(
-    input: AgentInput,
-    options: ResumableOptions = {},
-  ): ResumableRun<TOutput> {
-    return startResumable<TOutput>(this.config, this.streamStore(), input, options)
+  resumable<T = TOutput>(input: AgentInput, options: ResumableOptions = {}): ResumableRun<T> {
+    return startResumable<T>(this.config, this.streamStore(), input, options)
   }
 
   /**
@@ -250,18 +255,26 @@ export class Agent {
    * ```ts
    * const cheap = agent.clone({ model: openrouter('anthropic/claude-haiku-4-5') })
    * ```
+   *
+   * It is also the per-request path for a schema, since `RunOptions` cannot
+   * carry one — `agent.clone({ outputSchema: Ticket })` returns an
+   * `Agent<Ticket>`, inferred.
    */
-  clone(overrides: Partial<AgentConfig>): Agent {
-    return new Agent({ ...this.config, ...overrides })
+  clone<TNext = TOutput>(overrides: Partial<AgentConfig<TNext>>): Agent<TNext> {
+    // TypeScript cannot see that spreading a `Partial<AgentConfig<TNext>>` over
+    // an `AgentConfig<TOutput>` produces an `AgentConfig<TNext>` — it has no way
+    // to know `outputSchema` is either overridden or irrelevant. It is, because
+    // `TNext` only differs from `TOutput` when the caller passed a new schema.
+    return new Agent({ ...this.config, ...overrides } as AgentConfig<TNext>)
   }
 
   /** A copy of this agent with additional tools appended. */
-  withTools(...tools: readonly AnyTool[]): Agent {
-    return this.clone({ tools: [...(this.config.tools ?? []), ...tools] })
+  withTools(...tools: readonly AnyTool[]): Agent<TOutput> {
+    return this.clone<TOutput>({ tools: [...(this.config.tools ?? []), ...tools] })
   }
 
   /** The resolved configuration. Read-only; mutating it does nothing. */
-  toConfig(): Readonly<AgentConfig> {
+  toConfig(): Readonly<AgentConfig<TOutput>> {
     return { ...this.config }
   }
 }
@@ -272,15 +285,15 @@ export class Agent {
  * Sugar, not a second code path: `run` and `stream` are the agent's own with a
  * `sessionId` attached.
  */
-export interface AgentSession {
+export interface AgentSession<TOutput = string> {
   readonly sessionId: string
 
   /** The store backing this conversation, for direct access when you need it. */
   readonly store: SessionStore
 
-  run<TOutput = string>(input: AgentInput, options?: RunOptions): Promise<RunResult<TOutput>>
+  run<T = TOutput>(input: AgentInput, options?: RunOptions): Promise<RunResult<T>>
 
-  stream<TOutput = string>(input: AgentInput, options?: RunOptions): StreamedRun<TOutput>
+  stream<T = TOutput>(input: AgentInput, options?: RunOptions): StreamedRun<T>
 
   /**
    * The stored transcript, oldest first. Untrimmed — this is what was saved, not
@@ -315,9 +328,9 @@ export interface AgentSession {
  * Handy for one-shot calls where an agent instance would not be reused.
  */
 export async function run<TOutput = string>(
-  config: AgentConfig,
+  config: AgentConfig<TOutput>,
   input: AgentInput,
   options: RunOptions = {},
 ): Promise<RunResult<TOutput>> {
-  return new Agent(config).run<TOutput>(input, options)
+  return new Agent(config).run(input, options)
 }

@@ -112,6 +112,7 @@ export type {
   ModelRequestEvent,
   ModelResponseEvent,
   ModelRetryEvent,
+  OutputInvalidEvent,
   RunErrorEvent,
   RunFinishEvent,
   RunStartEvent,
@@ -130,6 +131,7 @@ export {
   AgentError,
   AuthenticationError,
   ConfigurationError,
+  InvalidOutputError,
   InvalidSchemaError,
   InvalidToolInputError,
   NetworkError,
@@ -181,6 +183,7 @@ export {
 } from './schema/standard-schema.js'
 export type {
   InferSchemaOutput,
+  SchemaSubject,
   StandardSchemaV1,
   ValidationResult,
 } from './schema/standard-schema.js'

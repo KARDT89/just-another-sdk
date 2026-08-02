@@ -110,6 +110,15 @@ export function consoleTracer(options: ConsoleTracerOptions = {}): EventListener
         )
         break
 
+      case 'output.invalid': {
+        const count = `${event.issues.length} issue${event.issues.length === 1 ? '' : 's'}`
+        const next = event.repairing
+          ? `repairing ${event.attempt}/${event.maxAttempts}`
+          : 'giving up'
+        write(`  ${paint('yellow', '⚠')} output invalid ${paint('dim', `· ${count} · ${next}`)}`)
+        break
+      }
+
       case 'model.fallback':
         write(
           `  ${paint('yellow', '⇄')} fallback ${paint('dim', '→')} ${event.toModelId} ${paint('dim', `· after ${event.error.code}`)}`,

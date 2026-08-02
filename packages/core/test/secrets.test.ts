@@ -1,8 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
-import { Agent, consoleTracer, redact, redactHeaders, redactString, tool } from '../src/index.js'
+import * as z from 'zod'
+
+import {
+  Agent,
+  consoleTracer,
+  type InvalidOutputError,
+  redact,
+  redactHeaders,
+  redactString,
+  tool,
+} from '../src/index.js'
 import { openrouter } from '../src/providers/index.js'
-import { collectEvents } from '../src/testing/index.js'
+import { collectEvents, mockProvider } from '../src/testing/index.js'
 
 /**
  * The SDK makes a specific promise: an API key never appears in a thrown error,
@@ -222,5 +232,56 @@ describe('end-to-end guarantees', () => {
     const printed = lines.join('\n')
     expect(printed).not.toContain(SECRET)
     expect(printed).toContain('[redacted]')
+  })
+
+  /**
+   * A model that fails `outputSchema` can be echoing back anything the user
+   * pasted in, including a credential. That text has to reach the developer
+   * debugging the failure and nothing else — which is why it lives on the error
+   * instance rather than in `details`, the log-safe form the tracer and the SSE
+   * serializer both read.
+   *
+   * `model.response.text` is a separate matter and deliberately untouched: it
+   * has always carried the model's answer verbatim, the tracer only prints it
+   * under `verbose`, and `redact()` catches key-shaped substrings on the way out
+   * to a browser. The assertion below is about what *this* feature added.
+   */
+  it('keeps invalid model output out of the failure it reports', async () => {
+    const lines: string[] = []
+    const collected = collectEvents()
+    const model = mockProvider([{ text: `{"answer": "${SECRET}"}` }])
+
+    const agent = new Agent({
+      name: 'a',
+      model,
+      outputSchema: z.object({ answer: z.number() }),
+      maxOutputRetries: 0,
+    })
+
+    const error = (await agent
+      .run('go', {
+        onEvent: (event) => {
+          collected.listener(event)
+          consoleTracer({ color: false, write: (line) => lines.push(line) })(event)
+        },
+      })
+      .catch((caught: unknown) => caught)) as InvalidOutputError
+
+    const invalid = collected.ofType('output.invalid')
+    expect(invalid).toHaveLength(1)
+    expect(JSON.stringify(invalid)).not.toContain(SECRET)
+
+    // The error's log-safe form, and everything the tracer printed.
+    expect(JSON.stringify(error.toJSON())).not.toContain(SECRET)
+    expect(error.message).not.toContain(SECRET)
+    expect(lines.join('\n')).not.toContain(SECRET)
+    expect(lines.join('\n')).toContain('output invalid')
+
+    // The developer holding the error can still see what the model actually said.
+    expect(error.rawText).toContain(SECRET)
+
+    // And redaction still covers the one event that does carry model text, which
+    // is what the SSE serializer applies before anything reaches a browser.
+    expect(JSON.stringify(redact(collected.events))).not.toContain(SECRET)
   })
 })

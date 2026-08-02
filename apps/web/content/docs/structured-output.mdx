@@ -3,83 +3,254 @@ title: Structured output
 description: Typed, schema-validated results instead of a string.
 ---
 
-<Callout type="warn">
-  **Not shipped yet.** `RunResult` is already generic over its output type and
-  `ResponseFormat` already exists on the provider contract, so this arrives
-  without a breaking change.
-</Callout>
-
-## Intended API
+Give an agent an `outputSchema` and `result.output` stops being a string you have
+to parse. It becomes an object the compiler already knows the shape of, validated
+before you ever see it.
 
 ```ts
 import * as z from 'zod'
 
 const Ticket = z.object({
   category: z.enum(['bug', 'feature', 'question']),
-  severity: z.number().min(1).max(5),
+  severity: z.number().int().min(1).max(5),
   summary: z.string(),
 })
 
 const agent = new Agent({
   name: 'triage',
+  instructions: 'Read the customer message and classify it.',
   model,
   outputSchema: Ticket,
 })
 
-const result = await agent.run(ticketText)
+const result = await agent.run(customerEmail)
 
-result.output.category // 'bug' — typed, validated
-result.output.severity // number
+result.output.category // 'bug' | 'feature' | 'question'
+result.output.severity + 1 // a real number — no cast anywhere
+result.text // the raw JSON the model produced
 ```
 
-`RunResult<TOutput>` is generic today and `output` is typed `string` by default,
-so adding `outputSchema` narrows it rather than changing the shape of the result.
+The type comes from the schema. You never write `run<Ticket>()`, and there is no
+`as` at the call site.
 
-## Invalid output
+Any [Standard Schema](https://standardschema.dev) validator works — Zod, Valibot,
+ArkType — the same interop [`tool()`](/docs/tools) uses.
 
-A model can produce JSON that does not match your schema. The planned behaviour,
-in order:
+## Configuration
 
-1. **Provider-native constraints.** Where the provider supports JSON Schema
-   response formats, use them — the model is prevented from producing invalid
-   output rather than corrected afterwards.
-2. **Repair retry.** On a validation failure, send the validation errors back and
-   ask for a correction, up to a configurable number of attempts.
-3. **A useful error.** If repair fails, throw with the per-field issues and the
-   raw text, so you can see what the model actually said.
+<TypeTable
+  type={{
+    outputSchema: {
+      type: 'StandardSchemaV1',
+      description:
+        'The schema the final answer must satisfy. Its output type becomes result.output.',
+    },
+    outputJsonSchema: {
+      type: 'ObjectJsonSchema',
+      description:
+        'Send this JSON Schema to the model instead of deriving one. Escape hatch for validators the SDK cannot convert, and for provider strict modes.',
+    },
+    maxOutputRetries: {
+      type: 'number',
+      default: '1',
+      description:
+        'Repair attempts after a failed validation. 0 fails on the first bad answer.',
+    },
+  }}
+/>
+
+## How it works
+
+Three layers, applied in order, because no single one is enough.
+
+1. **Native constraints.** The derived JSON Schema is sent as the provider's
+   `response_format`, so a vendor that supports constrained decoding is prevented
+   from producing invalid output rather than corrected afterwards.
+2. **A prompt instruction.** The schema is also appended to the system prompt,
+   always. Plenty of gateways — Ollama, older vLLM builds, some OpenRouter
+   upstreams — accept `response_format` and silently ignore it, and there is no
+   capability flag to ask. Sixty tokens is cheaper than the class of bug this
+   prevents.
+3. **Extraction and validation.** The answer is parsed — bare JSON, a fenced
+   block, or an object embedded in prose all work — and then validated. Only then
+   does it become `result.output`.
+
+## Composing with tools
+
+`outputSchema` and `tools` work together, and that is the useful case: call
+whatever you need, then return a typed object.
 
 ```ts
+const agent = new Agent({
+  name: 'triage',
+  model,
+  tools: [lookupCustomer],
+  outputSchema: Ticket,
+})
+
+const result = await agent.run(email)
+result.output.severity // informed by the tool result
+```
+
+The loop is unchanged. The schema rides along on every model call, and only the
+final answer — the turn where the model stops calling tools — is validated.
+
+## When the model gets it wrong
+
+A model that returns prose, a fenced block, or one field of the wrong type gets
+one chance to fix it. The failed answer and the specific validation errors go
+back, and the model tries again:
+
+```text
+Your previous response did not match the required JSON Schema.
+
+  • severity: Expected number, received string
+
+Reply with only the corrected JSON object. No prose, no code fences.
+```
+
+A repair is recorded in `steps` but does **not** count as a turn:
+
+```ts
+result.steps.map((step) => step.kind) // ['turn', 'repair']
+result.turns // 1
+result.usage // includes both calls
+```
+
+That split is deliberate. `maxTurns` is your tool-loop budget, and a repair is
+not progress on the task — folding them would let a non-compliant model eat the
+budget and end the run as `max_turns` with the failure reported on entirely the
+wrong path.
+
+<Callout type="info">
+  `maxOutputRetries` and [`maxRetries`](/docs/errors) are **additive, never
+  multiplicative**. `maxRetries` re-sends an identical request after a transport
+  failure; this one sends a different conversation. A schema mismatch is never
+  retried as a transport error.
+</Callout>
+
+## `InvalidOutputError`
+
+Once the repair budget is spent, the run throws. This is the third documented way
+a completed run can throw, alongside a provider failure and
+`onToolError: 'throw'`.
+
+```ts
+import { InvalidOutputError } from 'just-another-sdk'
+
 try {
   const result = await agent.run(input)
 } catch (error) {
   if (error instanceof InvalidOutputError) {
-    console.error(error.issues) // [{ path: ['severity'], message: 'Expected number' }]
-    console.error(error.rawText) // what the model actually produced
+    error.issues // [{ path: ['severity'], message: 'Expected number, received string' }]
+    error.rawText // exactly what the model said
+    error.attempts // repairs made before giving up
   }
 }
 ```
 
-## What works today
+`error.issues` is empty when the model returned no JSON at all — the validator
+never saw a value, so there is no path to report.
 
-Force a tool call and read its validated arguments. The tool's schema does the
-same job, and the input is already validated for you:
+<Callout type="warn">
+  `rawText` is on the instance and deliberately **not** in `details`, so it is
+  absent from `toJSON()`. `details` is the log-safe form the console tracer and
+  the SSE serializer both print, and raw model output is unbounded — it can echo
+  back whatever your user pasted in. Read `rawText` when you are debugging; do
+  not ship it to a log pipeline.
+</Callout>
+
+With a `sessionId`, a run that never validated persists **nothing** — same rule
+as any other failed run. The alternative is storing an unanswered exchange plus a
+schema scolding, which poisons the next turn.
+
+## Streaming
+
+With an `outputSchema` there are no `text.delta` events. The model's only text
+_is_ the JSON object, and half an object is not something a UI can render — the
+same reason partial tool arguments are withheld.
 
 ```ts
-const extract = tool({
-  name: 'extract_ticket',
-  description: 'Record the structured fields of a support ticket.',
-  inputSchema: Ticket,
-  execute: (fields) => fields, // just hand them back
-})
+const stream = agent.stream(input)
 
-const result = await new Agent({ name: 'triage', model, tools: [extract] }).run(
-  text,
-  {
-    toolChoice: { type: 'tool', name: 'extract_ticket' },
-  },
-)
+for await (const event of stream) {
+  // tool.start, tool.end, output.invalid, run.finish — but no text.delta
+}
 
-const ticket = result.steps[0]?.toolResults[0]?.output as z.infer<typeof Ticket>
+const result = await stream
+result.output.severity // validated, same as run()
 ```
 
-It is less elegant, but it is validated, typed at the edges, and available now.
+`toTextStream()` and `toResponse()` therefore produce an empty body. For a
+browser, use `toEventResponse()`: tool progress, `output.invalid`, and
+`run.finish` all still flow, and `run.finish.text` carries the raw JSON.
+
+There is no partial-object API. Structured output and text streaming are mutually
+exclusive by construction.
+
+## Provider notes
+
+The derived schema is sent with `strict: false`. OpenAI's strict mode rejects any
+schema that does not set `additionalProperties: false` and mark every property
+`required`, and no validator's JSON Schema output guarantees either — one
+optional field would fail the request outright. Non-strict `json_schema` still
+constrains the model hard, and the runtime validates regardless.
+
+To opt in, supply a schema that already satisfies those rules:
+
+```ts
+new Agent({
+  name: 'triage',
+  model,
+  outputSchema: Ticket,
+  outputJsonSchema: {
+    type: 'object',
+    properties: {/* ... */},
+    required: ['category', 'severity', 'summary'],
+    additionalProperties: false,
+  },
+})
+```
+
+## Testing it
+
+`mockProvider` needs nothing special to exercise the repair path — a
+malformed-then-valid script _is_ the repair:
+
+````ts
+const model = mockProvider([
+  { text: 'Sure! ```json\n{"severity":"high"}\n```' },
+  { text: '{"category":"bug","severity":4,"summary":"..."}' },
+])
+
+const result = await new Agent({
+  name: 'triage',
+  model,
+  outputSchema: Ticket,
+}).run('x')
+
+expect(result.output.severity).toBe(4)
+expect(result.steps.map((s) => s.kind)).toEqual(['turn', 'repair'])
+````
+
+## When to prefer a tool instead
+
+If what you want is a _side effect_ with validated arguments rather than a return
+value, force a tool call. The tool's own schema does the same validation, and the
+model's intent is clearer:
+
+```ts
+const fileTicket = tool({
+  name: 'file_ticket',
+  description: 'File a support ticket.',
+  inputSchema: Ticket,
+  execute: (fields) => ticketSystem.create(fields),
+})
+
+await new Agent({ name: 'triage', model, tools: [fileTicket] }).run(text, {
+  toolChoice: { type: 'tool', name: 'file_ticket' },
+})
+```
+
+Use `outputSchema` when you want the answer. Use a forced tool when you want the
+action.

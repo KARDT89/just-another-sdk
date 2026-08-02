@@ -6,6 +6,7 @@ import {
   type StandardSchemaV1,
   isStandardSchema,
   resolveJsonSchema,
+  toolSubject,
 } from '../schema/standard-schema.js'
 import { ConfigurationError } from '../errors/errors.js'
 
@@ -172,7 +173,7 @@ async function buildDefinition(args: {
   const { name, description, inputSchema, parameters } = args
 
   const resolved = inputSchema
-    ? await resolveJsonSchema(inputSchema, name, parameters)
+    ? await resolveJsonSchema(inputSchema, toolSubject(name), parameters)
     : (parameters ?? EMPTY_OBJECT_SCHEMA)
 
   return { name, description, parameters: resolved }

@@ -27,6 +27,7 @@
     "example:sessions": "pnpm --filter example-sessions start",
     "example:server": "pnpm --filter example-chat-server start",
     "example:resumable": "pnpm --filter example-resumable start",
+    "example:structured": "pnpm --filter example-structured start",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "turbo run build --filter=just-another-sdk && changeset publish"

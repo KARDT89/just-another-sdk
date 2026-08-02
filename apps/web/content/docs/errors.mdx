@@ -39,6 +39,7 @@ This distinction is the most important thing on this page.
 | Provider is down, rate-limited, or rejects the key | Throws                                                                        |
 | The run is cancelled or times out                  | Throws                                                                        |
 | A tool fails under `onToolError: 'throw'`          | Throws                                                                        |
+| `outputSchema` unsatisfied after repairs           | Throws `InvalidOutputError`, with the per-field issues                        |
 | Misconfiguration                                   | Throws, at construction time                                                  |
 
 A `RunResult` in hand therefore always means the agent produced something.
@@ -93,6 +94,11 @@ A `RunResult` in hand therefore always means the agent produced something.
     invalid_schema: {
       type: 'not retryable',
       description: 'A schema could not be converted to JSON Schema.',
+    },
+    invalid_output: {
+      type: 'not retryable',
+      description:
+        'The final answer failed outputSchema and the repair budget was spent. Carries issues and rawText.',
     },
   }}
 />

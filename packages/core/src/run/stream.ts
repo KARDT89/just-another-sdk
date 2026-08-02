@@ -117,7 +117,7 @@ export interface StreamedRun<TOutput = string>
  * ordering guarantees.
  */
 export function streamAgent<TOutput = string>(
-  config: AgentConfig,
+  config: AgentConfig<unknown>,
   input: AgentInput,
   options: RunOptions = {},
 ): StreamedRun<TOutput> {

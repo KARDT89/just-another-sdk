@@ -32,7 +32,7 @@ export interface ResolvedRetryPolicy {
 }
 
 export function resolveRetryPolicy(
-  config: AgentConfig,
+  config: AgentConfig<unknown>,
   options: RunOptions = {},
 ): ResolvedRetryPolicy {
   return {

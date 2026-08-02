@@ -343,6 +343,16 @@ them together.
 `streamAgent(config, input, options)` is the functional form, for when an `Agent`
 instance would not be reused.
 
+### Streaming with a schema
+
+An agent with an [`outputSchema`](/docs/structured-output) emits **no**
+`text.delta` events, so `.textStream()` and `.toResponse()` produce nothing. The
+model's only text is the JSON object, and half an object is not renderable — the
+same reason partial tool arguments are withheld.
+
+`await stream` still resolves to the validated result, and `.toEventResponse()`
+still carries tool progress, `output.invalid`, and `run.finish`.
+
 ### Resumable runs
 
 | Member                             | Description                                                                                         |

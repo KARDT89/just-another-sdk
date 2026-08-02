@@ -1,6 +1,6 @@
 import type { FinishReason, ToolDefinition } from '../providers/provider.js'
 import type { StopReason } from '../run/result.js'
-import type { AgentError } from '../errors/errors.js'
+import type { AgentError, SchemaIssue } from '../errors/errors.js'
 import type { ToolCallPart, ToolResultPart, Usage } from '../types/messages.js'
 
 /**
@@ -189,6 +189,33 @@ export interface SessionSaveEvent extends EventBase {
   readonly durationMs: number
 }
 
+/**
+ * The final answer failed the agent's `outputSchema`.
+ *
+ * Fires on *every* failed attempt including the last, unlike `model.retry`,
+ * which only fires when another attempt is actually coming. Here the attempt
+ * that is not coming is the interesting one — the run is about to throw — and a
+ * trace that went silent at exactly that moment would be useless.
+ *
+ * The raw model text is deliberately absent: events cross an SSE boundary to
+ * browsers, and model output is unbounded and can echo back whatever the user
+ * pasted in. `InvalidOutputError.rawText` carries it to the process that can be
+ * trusted with it.
+ */
+export interface OutputInvalidEvent extends EventBase {
+  readonly type: 'output.invalid'
+  /** The turn whose answer failed. */
+  readonly turn: number
+  /** 1-based index of the validation attempt that just failed. */
+  readonly attempt: number
+  /** Total attempts that will be made — `maxOutputRetries + 1`. */
+  readonly maxAttempts: number
+  /** Empty when the text was not JSON at all. */
+  readonly issues: readonly SchemaIssue[]
+  /** True when a repair request is about to be sent. */
+  readonly repairing: boolean
+}
+
 /** The run finished. Always the last event on a successful run. */
 export interface RunFinishEvent extends EventBase {
   readonly type: 'run.finish'
@@ -218,6 +245,7 @@ export type AgentEvent =
   | ModelFallbackEvent
   | ToolStartEvent
   | ToolEndEvent
+  | OutputInvalidEvent
   | RunFinishEvent
   | RunErrorEvent
 

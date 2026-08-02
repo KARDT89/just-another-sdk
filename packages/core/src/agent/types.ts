@@ -5,6 +5,8 @@ import type { AgentEvent } from '../events/events.js'
 import type { SessionStore } from '../sessions/store.js'
 import type { StreamStore } from '../streams/store.js'
 import type { ContextPolicy } from '../sessions/trim.js'
+import type { StandardSchemaV1 } from '../schema/standard-schema.js'
+import type { ObjectJsonSchema } from '../types/json-schema.js'
 import type { ModelMessage } from '../types/messages.js'
 
 /**
@@ -24,7 +26,7 @@ export type ToolErrorPolicy = 'return' | 'throw'
  * counters — that is `RunState` (per run) and, later, `Session` (persisted).
  * Keeping the three apart is what lets one agent serve many concurrent users.
  */
-export interface AgentConfig {
+export interface AgentConfig<TOutput = string> {
   /** Human-readable name. Appears in events, traces, and handoff decisions. */
   readonly name: string
 
@@ -134,6 +136,45 @@ export interface AgentConfig {
    */
   readonly streams?: StreamStore
 
+  /**
+   * Make `result.output` a validated object instead of a string.
+   *
+   * Any Standard Schema validator — the same interop `tool()` uses, so no
+   * validator becomes a dependency of yours or ours. The type flows through:
+   *
+   * ```ts
+   * const Ticket = z.object({ severity: z.number(), summary: z.string() })
+   * const agent = new Agent({ name: 'triage', model, outputSchema: Ticket })
+   *
+   * const result = await agent.run(email)
+   * result.output.severity   // number — inferred, no cast
+   * ```
+   *
+   * Composes with `tools`: the loop runs exactly as it always does, and only the
+   * final answer is validated. `result.text` still holds the raw JSON.
+   */
+  readonly outputSchema?: StandardSchemaV1<unknown, TOutput>
+
+  /**
+   * The JSON Schema sent to the model, bypassing automatic derivation.
+   *
+   * The same escape hatch `tool()` calls `parameters`. Two uses: a validator the
+   * SDK cannot convert, and satisfying a provider's strict mode — see
+   * {@link ResponseFormat.strict}.
+   */
+  readonly outputJsonSchema?: ObjectJsonSchema
+
+  /**
+   * Attempts to repair a final answer that failed `outputSchema`. Default 1, so
+   * a run makes at most two tries at the schema. Set 0 to fail on the first.
+   *
+   * Deliberately *not* {@link AgentConfig.maxRetries}: that budget re-sends an
+   * identical request after a transport failure, from inside the model call.
+   * This one sends a *different* request — the conversation plus the validation
+   * errors — from outside it. The two are additive, never multiplicative.
+   */
+  readonly maxOutputRetries?: number
+
   /** Free-form tags passed to providers that support them, and to traces. */
   readonly metadata?: Readonly<Record<string, string>>
 }
@@ -180,6 +221,16 @@ export interface RunOptions {
   readonly maxRetries?: number
 
   /**
+   * Overrides {@link AgentConfig.maxOutputRetries} for this run only.
+   *
+   * There is no per-run `outputSchema` to go with it: a schema changes the
+   * *return type*, and `RunOptions` is shared by `AgentSession`, resumable runs,
+   * and the HTTP helpers, none of which could carry that type through. Use
+   * `agent.clone({ outputSchema })` for a per-request schema — it infers.
+   */
+  readonly maxOutputRetries?: number
+
+  /**
    * Observe the run as it happens. Synchronous and fire-and-forget: a throwing
    * listener is swallowed so instrumentation can never break a run.
    */
@@ -209,6 +260,7 @@ export const AGENT_DEFAULTS: {
   readonly maxRetries: number
   readonly retryDelayMs: number
   readonly maxRetryDelayMs: number
+  readonly maxOutputRetries: number
 } = Object.freeze({
   maxTurns: 10,
   toolTimeoutMs: 30_000,
@@ -217,4 +269,10 @@ export const AGENT_DEFAULTS: {
   maxRetries: 2,
   retryDelayMs: 250,
   maxRetryDelayMs: 10_000,
+  // One, not two like `maxRetries`. A transport retry replays an identical
+  // request cheaply; a repair replays the whole conversation *plus* the bad
+  // answer *plus* the issue list, and it is the most expensive retry in the SDK.
+  // One catches the common failures — a prose wrapper, a code fence, one coerced
+  // field. A model that got the shape wrong twice does not know the shape.
+  maxOutputRetries: 1,
 })

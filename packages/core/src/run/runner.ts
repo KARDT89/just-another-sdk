@@ -4,10 +4,18 @@ import {
   type AgentInput,
   type RunOptions,
 } from '../agent/types.js'
-import { AbortError, ConfigurationError, TimeoutError, toAgentError } from '../errors/errors.js'
+import {
+  AbortError,
+  ConfigurationError,
+  InvalidOutputError,
+  TimeoutError,
+  toAgentError,
+  type SchemaIssue,
+} from '../errors/errors.js'
 import { EventEmitter } from '../events/emitter.js'
 import { toolCallsOf, textOf } from '../providers/provider.js'
-import type { ModelRequest, ModelResponse } from '../providers/provider.js'
+import type { ModelProvider, ModelRequest, ModelResponse } from '../providers/provider.js'
+import { validate } from '../schema/standard-schema.js'
 import { defaultSessionStore } from '../sessions/memory.js'
 import type { SessionStore } from '../sessions/store.js'
 import { applySummary, summarizeMessages, type SummarizeOptions } from '../sessions/summarize.js'
@@ -18,8 +26,15 @@ import { assistantMessage, toolMessage, userMessage } from '../types/messages.js
 import type { ModelMessage, ToolResultPart } from '../types/messages.js'
 import { createRunId } from '../util/id.js'
 import { callModel } from './model-call.js'
+import {
+  extractJson,
+  joinInstructions,
+  repairRequest,
+  resolveOutput,
+  type ResolvedOutput,
+} from './output.js'
 import type { RunResult, StopReason } from './result.js'
-import { resolveRetryPolicy, throwIfAborted } from './retry.js'
+import { resolveRetryPolicy, throwIfAborted, type ResolvedRetryPolicy } from './retry.js'
 import { RunState } from './run-state.js'
 
 /**
@@ -53,7 +68,7 @@ import { RunState } from './run-state.js'
  *      re-derive what happened.
  */
 export async function runAgent<TOutput = string>(
-  config: AgentConfig,
+  config: AgentConfig<unknown>,
   input: AgentInput,
   options: RunOptions = {},
 ): Promise<RunResult<TOutput>> {
@@ -90,7 +105,7 @@ export interface RunInternals {
  * @internal
  */
 export async function executeRun<TOutput = string>(
-  config: AgentConfig,
+  config: AgentConfig<unknown>,
   input: AgentInput,
   options: RunOptions,
   internals: RunInternals,
@@ -139,6 +154,29 @@ export async function executeRun<TOutput = string>(
 
   const toolDefinitions = await registry.definitions()
 
+  // Resolved beside the tool definitions and for the same reason: the first
+  // derivation can pay for a dynamic `import('zod')`, and neither the schema nor
+  // its instruction changes between turns.
+  const output = await resolveOutput(config, options)
+
+  // The schema instruction is layered on top of the developer's prompt rather
+  // than merged into the request, so `result.messages` carries exactly what the
+  // model saw. `resolveInstructions` stays the developer's prompt alone — a
+  // function instruction is still called exactly once, and an agent with no
+  // instructions still gets a system message here rather than losing the schema.
+  const system = output ? joinInstructions(instructions, output.instruction) : instructions
+
+  // Hoisted so the loop body stays literal. With an `outputSchema` the model's
+  // only text *is* the JSON object, and half an object is not something any UI
+  // can render — the same reasoning that withholds partial tool arguments and
+  // keeps `model.request` out of the browser. The transport still streams; the
+  // event is what we withhold.
+  const emitTextDelta = output
+    ? () => {}
+    : (turn: number, delta: string) => {
+        events.emit({ type: 'text.delta', runId, agentName: config.name, turn, delta })
+      }
+
   // Resolved once: these do not change between turns, and rebuilding them per
   // turn would be pure waste in the hottest part of the loop.
   const toolChoice = options.toolChoice ?? config.toolChoice
@@ -161,9 +199,10 @@ export async function executeRun<TOutput = string>(
 
       const request: ModelRequest = {
         messages: state.messages,
-        ...(instructions ? { system: instructions } : {}),
+        ...(system ? { system } : {}),
         ...(toolDefinitions ? { tools: toolDefinitions } : {}),
         ...(toolChoice !== undefined ? { toolChoice } : {}),
+        ...(output ? { responseFormat: output.responseFormat } : {}),
         ...(config.maxOutputTokens !== undefined
           ? { maxOutputTokens: config.maxOutputTokens }
           : {}),
@@ -190,7 +229,7 @@ export async function executeRun<TOutput = string>(
         retry: retryPolicy,
         streaming: internals.streaming,
         onTextDelta: (delta) => {
-          events.emit({ type: 'text.delta', runId, agentName: config.name, turn, delta })
+          emitTextDelta(turn, delta)
         },
         onRetry: (info) => {
           events.emit({
@@ -322,6 +361,30 @@ export async function executeRun<TOutput = string>(
       }
     }
 
+    // Validated on every exit path, `max_turns` included: `outputSchema` is a
+    // type contract, and returning a `RunResult<Ticket>` whose `output` is
+    // really a string is worse than an error naming the field that failed.
+    //
+    // **This must stay above the session save.** Throwing here is what keeps the
+    // "only a completed run is persisted" invariant true for a run that never
+    // produced a valid answer — there is no extra code enforcing it, only this
+    // ordering. Moving the call below the save would break it silently.
+    const validated = output
+      ? await finalizeOutput({
+          output,
+          state,
+          config,
+          events,
+          runId,
+          signal,
+          providers,
+          retryPolicy,
+          modelTimeoutMs,
+          system,
+          metadata,
+        })
+      : undefined
+
     // Only a completed run is persisted, and only the messages it produced.
     //
     // A run that threw mid-turn can leave an assistant message holding tool
@@ -342,7 +405,7 @@ export async function executeRun<TOutput = string>(
       })
     }
 
-    const result = buildResult<TOutput>(state, config, stopReason, instructions)
+    const result = buildResult<TOutput>(state, config, stopReason, system, validated)
 
     events.emit({
       type: 'run.finish',
@@ -374,6 +437,219 @@ export async function executeRun<TOutput = string>(
 }
 
 /* ------------------------------------------------------------------------- */
+/* Structured output                                                         */
+/* ------------------------------------------------------------------------- */
+
+/** A validated final answer, boxed so `undefined` stays a legal output value. */
+interface ValidatedOutput {
+  readonly value: unknown
+}
+
+/**
+ * Turns the model's final text into a value that satisfies `outputSchema`,
+ * re-asking a bounded number of times if it does not.
+ *
+ * Runs *outside* the loop, which is the whole design: the repair budget is
+ * additive to `maxTurns` rather than carved out of it, and it cannot interact
+ * with the transport retry inside `callModel` because that one re-sends an
+ * identical request while this one sends a different conversation.
+ *
+ * Throws {@link InvalidOutputError} when the budget is spent.
+ */
+async function finalizeOutput(args: {
+  output: ResolvedOutput
+  state: RunState
+  config: AgentConfig<unknown>
+  events: EventEmitter
+  runId: string
+  signal: AbortSignal
+  providers: readonly ModelProvider[]
+  retryPolicy: ResolvedRetryPolicy
+  modelTimeoutMs: number
+  system: string | undefined
+  metadata: Readonly<Record<string, string>> | undefined
+}): Promise<ValidatedOutput> {
+  const { output, state, config, events, runId, signal } = args
+
+  // The turn being repaired. Repair steps carry it too, so `steps` still group
+  // by exchange rather than inventing turn numbers that never happened.
+  const turn = state.turns
+  const maxAttempts = output.maxRetries + 1
+
+  let text = state.finalText()
+  let issues: readonly SchemaIssue[] = []
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    throwIfAborted(signal)
+
+    const extracted = extractJson(text)
+    if (extracted.ok) {
+      const result = await validate(output.schema, extracted.value)
+      if (result.ok) return { value: result.value }
+      issues = result.issues
+    } else {
+      // No issues to report: the validator never saw a value. The repair prompt
+      // and the error both say so rather than inventing a path.
+      issues = []
+    }
+
+    const repairing = attempt < maxAttempts
+
+    events.emit({
+      type: 'output.invalid',
+      runId,
+      agentName: config.name,
+      turn,
+      attempt,
+      maxAttempts,
+      issues,
+      repairing,
+    })
+
+    if (!repairing) break
+
+    text = await requestRepair({ ...args, turn, issues })
+  }
+
+  throw new InvalidOutputError(issues, text, { attempts: output.maxRetries })
+}
+
+/**
+ * One repair call: shows the model its own invalid answer plus what was wrong
+ * with it, and returns the new text.
+ *
+ * Goes through `callModel` like every other model call, so retries, fallbacks,
+ * timeouts, cancellation, and the `model.retry` / `model.fallback` events all
+ * keep working during a repair.
+ */
+async function requestRepair(args: {
+  state: RunState
+  config: AgentConfig<unknown>
+  events: EventEmitter
+  runId: string
+  signal: AbortSignal
+  providers: readonly ModelProvider[]
+  retryPolicy: ResolvedRetryPolicy
+  modelTimeoutMs: number
+  system: string | undefined
+  metadata: Readonly<Record<string, string>> | undefined
+  output: ResolvedOutput
+  turn: number
+  issues: readonly SchemaIssue[]
+}): Promise<string> {
+  const { state, config, events, runId, signal, output, turn, issues } = args
+
+  // The invalid assistant turn is already in the log — the loop appended it
+  // before taking the exit branch — so the model can see what it said. This adds
+  // only the correction, as a `user` message: a second mid-conversation `system`
+  // message is ignored or rejected by several providers, and a tool message
+  // would need a `toolCallId` that does not exist here.
+  state.append(userMessage(repairRequest(issues)))
+
+  const startedAt = Date.now()
+
+  // No `tools` on a repair request. We are outside the loop, so a tool call
+  // could not be executed if the model made one; omitting the definitions is
+  // what guarantees the answer is text. Not `toolChoice: 'none'` — some
+  // OpenAI-compatible servers reject a choice sent without tools.
+  const request: ModelRequest = {
+    messages: state.messages,
+    ...(args.system ? { system: args.system } : {}),
+    responseFormat: output.responseFormat,
+    ...(config.maxOutputTokens !== undefined ? { maxOutputTokens: config.maxOutputTokens } : {}),
+    ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+    ...(args.metadata ? { metadata: args.metadata } : {}),
+  }
+
+  events.emit({
+    type: 'model.request',
+    runId,
+    agentName: config.name,
+    turn,
+    modelId: config.model.modelId,
+    messageCount: state.messageCount,
+    tools: [],
+  })
+
+  const outcome = await callModel({
+    providers: args.providers,
+    request,
+    signal,
+    timeoutMs: args.modelTimeoutMs,
+    retry: args.retryPolicy,
+    // A repair answer is a JSON object that is withheld from `text.delta`
+    // anyway, so streaming it would buy nothing but a second code path.
+    streaming: false,
+    onTextDelta: () => {},
+    onRetry: (info) => {
+      events.emit({
+        type: 'model.retry',
+        runId,
+        agentName: config.name,
+        turn,
+        modelId: info.provider.modelId,
+        providerId: info.provider.providerId,
+        attempt: info.attempt,
+        maxAttempts: info.maxAttempts,
+        error: info.error,
+        delayMs: info.delayMs,
+        discardedText: info.discardedText,
+      })
+    },
+    onFallback: (info) => {
+      events.emit({
+        type: 'model.fallback',
+        runId,
+        agentName: config.name,
+        turn,
+        fromModelId: info.from.modelId,
+        fromProviderId: info.from.providerId,
+        toModelId: info.to.modelId,
+        toProviderId: info.to.providerId,
+        index: info.index,
+        error: info.error,
+        discardedText: info.discardedText,
+      })
+    },
+  })
+
+  const response = outcome.response
+  const text = textOf(response)
+  const durationMs = Date.now() - startedAt
+
+  state.append(assistantMessage(response.content))
+
+  events.emit({
+    type: 'model.response',
+    runId,
+    agentName: config.name,
+    turn,
+    modelId: response.modelId,
+    text,
+    toolCalls: [],
+    finishReason: response.finishReason,
+    usage: response.usage,
+    durationMs,
+  })
+
+  // Recorded as a step but not as a turn: it costs tokens and can be served by a
+  // fallback, so leaving it out would make `usage` wrong — but it is not a loop
+  // turn, so counting it would push `turns` past `maxTurns`.
+  state.completeRepair({
+    turn,
+    text,
+    toolCalls: [],
+    toolResults: [],
+    finishReason: response.finishReason,
+    usage: response.usage,
+    durationMs,
+    modelId: response.modelId,
+  })
+
+  return text
+}
+
+/* ------------------------------------------------------------------------- */
 /* Sessions                                                                  */
 /* ------------------------------------------------------------------------- */
 
@@ -391,7 +667,10 @@ interface ResolvedSession {
  * in-memory store owned by that agent. Multi-turn therefore works with no
  * imports and no setup, and moving to real persistence is one config line.
  */
-function resolveSession(config: AgentConfig, options: RunOptions): ResolvedSession | undefined {
+function resolveSession(
+  config: AgentConfig<unknown>,
+  options: RunOptions,
+): ResolvedSession | undefined {
   const sessionId = options.sessionId
   if (sessionId === undefined) return undefined
 
@@ -417,7 +696,7 @@ function resolveSession(config: AgentConfig, options: RunOptions): ResolvedSessi
  * again.
  */
 async function loadHistory(
-  config: AgentConfig,
+  config: AgentConfig<unknown>,
   options: RunOptions,
   session: ResolvedSession | undefined,
   events: EventEmitter,
@@ -500,7 +779,7 @@ async function loadHistory(
  * continuity; losing it must never lose the answer.
  */
 async function summarizeDropped(args: {
-  config: AgentConfig
+  config: AgentConfig<unknown>
   session: ResolvedSession
   events: EventEmitter
   runId: string
@@ -604,9 +883,10 @@ function foldTarget(
 
 function buildResult<TOutput>(
   state: RunState,
-  config: AgentConfig,
+  config: AgentConfig<unknown>,
   stopReason: StopReason,
   instructions: string | undefined,
+  validated: ValidatedOutput | undefined,
 ): RunResult<TOutput> {
   const text = state.finalText()
 
@@ -619,9 +899,14 @@ function buildResult<TOutput>(
   return {
     runId: state.runId,
     agentName: config.name,
-    // Until structured output lands, the output *is* the text. The generic keeps
-    // the signature stable so adding it later is not a breaking change.
-    output: text as unknown as TOutput,
+    // With an `outputSchema` this is the value the validator produced, and the
+    // cast is sound: `TOutput` was inferred from that same schema.
+    //
+    // Without one the output *is* the text, and the cast is the caller's own
+    // assertion — `run<T>()` with no schema promises a `T` that nothing checks.
+    // That is why an unchecked `T` and a schema-derived one are different casts
+    // rather than one shared line.
+    output: (validated ? validated.value : text) as TOutput,
     text,
     stopReason,
     messages,
@@ -633,7 +918,7 @@ function buildResult<TOutput>(
   }
 }
 
-async function resolveInstructions(config: AgentConfig): Promise<string | undefined> {
+async function resolveInstructions(config: AgentConfig<unknown>): Promise<string | undefined> {
   if (config.instructions === undefined) return undefined
   if (typeof config.instructions === 'string') {
     return config.instructions.length > 0 ? config.instructions : undefined
@@ -657,7 +942,7 @@ function normalizeHistory(messages: readonly ModelMessage[] | undefined): readon
 }
 
 function mergeMetadata(
-  config: AgentConfig,
+  config: AgentConfig<unknown>,
   options: RunOptions,
 ): Readonly<Record<string, string>> | undefined {
   if (!config.metadata && !options.metadata) return undefined

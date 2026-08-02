@@ -222,7 +222,7 @@ function buildRequestBody(
           json_schema: {
             name: request.responseFormat.name ?? 'response',
             schema: request.responseFormat.schema,
-            strict: true,
+            strict: request.responseFormat.strict ?? false,
           },
         }
       : { type: 'json_object' }

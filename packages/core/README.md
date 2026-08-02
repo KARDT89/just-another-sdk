@@ -298,7 +298,7 @@ optional but the whole thing is designed around it.
 
 ## Roadmap
 
-Structured output · guardrails and approval gates · multi-agent handoffs ·
+Guardrails and approval gates · multi-agent handoffs · built-in tool pack ·
 native Anthropic and Gemini providers.
 
 ## License

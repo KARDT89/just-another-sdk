@@ -246,6 +246,40 @@ pnpm example:resumable
 The text is continuous across the reconnect — nothing repeated, nothing missing.
 See [Resuming a stream](/docs/streaming#resuming-a-stream).
 
+## 7 — Structured output
+
+```bash
+pnpm example:structured
+```
+
+Four acts. The first needs a key; **the rest run offline against `mockProvider`**,
+which is what makes the repair path something you can watch rather than take on
+trust.
+
+- A live model extracts a typed `Ticket` from a paragraph of customer prose.
+- A model that answers with prose, a code fence, **and** `severity: "high"`
+  instead of a number — repaired automatically on the second call.
+- Tools and a schema composed: `lookup_customer` runs first, then the typed
+  object.
+- `maxOutputRetries: 0` against a model that will not comply, so you can see what
+  `InvalidOutputError` actually carries.
+
+```text
+② a malformed first answer, repaired automatically
+
+▶ run_msbk5h1x_ef7vod  triage · mock/test-model
+  ⚠ output invalid · 1 issue · repairing 1/2
+✔ finish · 1 turn · 20 in / 10 out · 3ms
+
+   output.severity is 4, a number
+   steps: turn → repair
+   turns: 1 — the repair cost tokens, not a turn
+```
+
+That last line is the design in one place: a repair is billed and traced, but it
+is not a turn, so `maxTurns` stays the ceiling it claims to be. See
+[Structured output](/docs/structured-output).
+
 ## Patterns worth copying
 
 ### A shared agent in a server route

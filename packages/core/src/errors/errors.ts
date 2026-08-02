@@ -20,6 +20,7 @@ export type AgentErrorCode =
   | 'tool_execution_error'
   | 'tool_not_found'
   | 'invalid_schema'
+  | 'invalid_output'
 
 export interface AgentErrorOptions {
   /** Machine-readable discriminator. */
@@ -182,6 +183,63 @@ export class ToolNotFoundError extends AgentError {
 export class InvalidSchemaError extends AgentError {
   constructor(message: string, options: Omit<AgentErrorOptions, 'code'> = {}) {
     super(message, { ...options, code: 'invalid_schema' })
+  }
+}
+
+/**
+ * The model's final answer did not match the agent's `outputSchema`, and the
+ * repair budget was spent.
+ *
+ * The third documented way a *completed* run can throw, alongside a provider
+ * failure and `onToolError: 'throw'`. It exists because `outputSchema` is a type
+ * contract: returning a `RunResult<Ticket>` whose `output` is really a string
+ * the caller's types promise is a `Ticket` is worse than an error naming the
+ * field that failed.
+ *
+ * Never retryable. The transport retry in `run/retry.ts` re-sends an *identical*
+ * request, which cannot fix a schema mismatch; repairing is a different request
+ * and has its own budget in `maxOutputRetries`.
+ */
+export class InvalidOutputError extends AgentError {
+  readonly issues: readonly SchemaIssue[]
+
+  /**
+   * Exactly what the model produced, unparsed.
+   *
+   * Deliberately *not* in `details`, and so absent from `toJSON()`: `details` is
+   * the log-safe form the SSE serializer and the console tracer print, and raw
+   * model text is unbounded and can echo back whatever the user pasted in. Read
+   * it off the instance when you are debugging.
+   */
+  readonly rawText: string
+
+  /** Repair attempts made. `0` when `maxOutputRetries` is `0`. */
+  readonly attempts: number
+
+  constructor(
+    issues: readonly SchemaIssue[],
+    rawText: string,
+    options: Omit<AgentErrorOptions, 'code'> & { attempts?: number } = {},
+  ) {
+    const attempts = options.attempts ?? 0
+    super(
+      issues.length > 0
+        ? `The model's output did not match the agent's outputSchema:\n${formatIssues(issues)}`
+        : "The model did not return JSON matching the agent's outputSchema.",
+      {
+        ...options,
+        code: 'invalid_output',
+        retryable: false,
+        hint:
+          options.hint ??
+          'Raise `maxOutputRetries`, simplify the schema, or use a model with native ' +
+            'JSON Schema support. `error.rawText` holds what the model actually said.',
+        details: { issues, attempts },
+      },
+    )
+    this.issues = issues
+    this.rawText = rawText
+    this.attempts = attempts
   }
 }
 

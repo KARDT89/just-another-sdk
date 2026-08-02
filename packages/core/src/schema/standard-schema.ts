@@ -135,6 +135,27 @@ export function registerJsonSchemaConverter(vendor: string, convert: NamespaceCo
 }
 
 /**
+ * Who a schema belongs to.
+ *
+ * Only ever affects the wording and `details` of a failure — the conversion is
+ * identical for a tool's arguments and for an agent's `outputSchema`. It exists
+ * because a shared converter that says "tool" for both would hand the developer
+ * a hint pointing at code they did not write.
+ */
+export interface SchemaSubject {
+  /** Noun phrase, mid-sentence: `tool "get_weather"`. */
+  readonly label: string
+  /** What to do when no converter could be found. */
+  readonly hint: (vendor: string) => string
+  /** Leading clause of the not-an-object error: `Tool "get_weather" must accept an object`. */
+  readonly objectRequirement: string
+  /** What to do about it. */
+  readonly objectHint: string
+  /** Machine-readable context merged into the error's `details`. */
+  readonly details?: Readonly<Record<string, unknown>>
+}
+
+/**
  * Best-effort conversion of a validator schema into a JSON Schema object.
  *
  * Resolution order:
@@ -148,7 +169,7 @@ export function registerJsonSchemaConverter(vendor: string, convert: NamespaceCo
  */
 export async function resolveJsonSchema(
   schema: StandardSchemaV1,
-  toolName: string,
+  subject: SchemaSubject,
   override?: ObjectJsonSchema,
 ): Promise<ObjectJsonSchema> {
   if (override) return override
@@ -156,18 +177,41 @@ export async function resolveJsonSchema(
   const vendor = schema['~standard'].vendor
   const converted = await convertWithAnyStrategy(schema, vendor)
 
-  if (converted !== undefined) return asObjectSchema(converted, toolName, vendor)
+  if (converted !== undefined) return asObjectSchema(converted, subject, vendor)
 
   throw new InvalidSchemaError(
-    `Could not derive a JSON Schema for tool "${toolName}" from its "${vendor}" schema.`,
+    `Could not derive a JSON Schema for ${subject.label} from its "${vendor}" schema.`,
     {
-      hint:
-        'Pass an explicit `parameters` JSON Schema alongside `inputSchema` in your tool() ' +
-        `call, or register a converter with registerJsonSchemaConverter('${vendor}', fn).`,
-      details: { toolName, vendor },
+      hint: subject.hint(vendor),
+      details: { ...subject.details, vendor },
     },
   )
 }
+
+/** The subject a `tool()` definition converts under. */
+export function toolSubject(toolName: string): SchemaSubject {
+  return {
+    label: `tool "${toolName}"`,
+    hint: (vendor) =>
+      'Pass an explicit `parameters` JSON Schema alongside `inputSchema` in your tool() ' +
+      `call, or register a converter with registerJsonSchemaConverter('${vendor}', fn).`,
+    objectRequirement: `Tool "${toolName}" must accept an object`,
+    objectHint: 'Wrap the parameters in an object, e.g. z.object({ city: z.string() }).',
+    details: { toolName },
+  }
+}
+
+/** The subject an agent's `outputSchema` converts under. */
+export const OUTPUT_SUBJECT: SchemaSubject = Object.freeze({
+  label: "the agent's outputSchema",
+  hint: (vendor: string) =>
+    'Pass an explicit `outputJsonSchema` alongside `outputSchema` in your Agent config, ' +
+    `or register a converter with registerJsonSchemaConverter('${vendor}', fn).`,
+  objectRequirement: "An agent's outputSchema must describe an object",
+  objectHint:
+    'Wrap the result in an object, e.g. z.object({ answer: z.string() }). Providers ' +
+    'require a top-level object for JSON Schema output.',
+})
 
 async function convertWithAnyStrategy(schema: StandardSchemaV1, vendor: string): Promise<unknown> {
   const selfConverting = schema as unknown as SelfConverting
@@ -226,25 +270,24 @@ function attempt(fn: () => unknown): unknown {
  * whatever the converter produced into that shape, and drops the `$schema` key
  * that some vendors add and some providers reject.
  */
-function asObjectSchema(value: unknown, toolName: string, vendor: string): ObjectJsonSchema {
+function asObjectSchema(value: unknown, subject: SchemaSubject, vendor: string): ObjectJsonSchema {
+  const details = { ...subject.details, vendor }
+
   if (typeof value !== 'object' || value === null) {
-    throw new InvalidSchemaError(
-      `The JSON Schema derived for tool "${toolName}" is not an object.`,
-      {
-        details: { toolName, vendor },
-      },
-    )
+    throw new InvalidSchemaError(`The JSON Schema derived for ${subject.label} is not an object.`, {
+      details,
+    })
   }
 
   const { $schema: _dropped, ...rest } = value as JsonSchema & { $schema?: string }
 
   if (rest.type !== 'object') {
     throw new InvalidSchemaError(
-      `Tool "${toolName}" must accept an object, but its schema describes ` +
+      `${subject.objectRequirement}, but its schema describes ` +
         `${typeof rest.type === 'string' ? `a "${rest.type}"` : 'something else'}.`,
       {
-        hint: 'Wrap the parameters in an object, e.g. z.object({ city: z.string() }).',
-        details: { toolName, vendor },
+        hint: subject.objectHint,
+        details,
       },
     )
   }

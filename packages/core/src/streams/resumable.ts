@@ -58,7 +58,7 @@ export interface ResumableOptions extends RunOptions {
  * `AbortSignal` you control.
  */
 export function startResumable<TOutput = string>(
-  config: AgentConfig,
+  config: AgentConfig<unknown>,
   store: StreamStore,
   input: AgentInput,
   options: ResumableOptions = {},
