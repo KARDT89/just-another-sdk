@@ -59,6 +59,46 @@
         "default": "./dist/testing/index.cjs"
       }
     },
+    "./sessions": {
+      "import": {
+        "types": "./dist/sessions/index.d.ts",
+        "default": "./dist/sessions/index.js"
+      },
+      "require": {
+        "types": "./dist/sessions/index.d.cts",
+        "default": "./dist/sessions/index.cjs"
+      }
+    },
+    "./sessions/file": {
+      "import": {
+        "types": "./dist/sessions/file.d.ts",
+        "default": "./dist/sessions/file.js"
+      },
+      "require": {
+        "types": "./dist/sessions/file.d.cts",
+        "default": "./dist/sessions/file.cjs"
+      }
+    },
+    "./sessions/sqlite": {
+      "import": {
+        "types": "./dist/sessions/sqlite.d.ts",
+        "default": "./dist/sessions/sqlite.js"
+      },
+      "require": {
+        "types": "./dist/sessions/sqlite.d.cts",
+        "default": "./dist/sessions/sqlite.cjs"
+      }
+    },
+    "./streams": {
+      "import": {
+        "types": "./dist/streams/index.d.ts",
+        "default": "./dist/streams/index.js"
+      },
+      "require": {
+        "types": "./dist/streams/index.d.cts",
+        "default": "./dist/streams/index.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.cjs",

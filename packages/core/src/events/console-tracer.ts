@@ -48,6 +48,34 @@ export function consoleTracer(options: ConsoleTracerOptions = {}): EventListener
         )
         break
 
+      case 'session.load': {
+        // `truncated` turns an exact count into a lower bound, and saying "12+"
+        // rather than "12" is the difference between an honest trace and a
+        // misleading one.
+        const dropped =
+          event.droppedCount > 0 || event.truncated
+            ? paint('yellow', ` · trimmed ${event.droppedCount}${event.truncated ? '+' : ''}`)
+            : ''
+        write(
+          `  ${paint('dim', '↺')} session ${paint('dim', event.sessionId)} ${paint('dim', `· ${event.messageCount} message${event.messageCount === 1 ? '' : 's'}`)}${dropped}`,
+        )
+        break
+      }
+
+      case 'session.summarize':
+        write(
+          event.error
+            ? `  ${paint('yellow', '⚠')} summary failed ${paint('dim', `· ${event.error.code} · trimmed ${event.foldedCount} instead`)}`
+            : `  ${paint('dim', '∑')} summarised ${event.foldedCount} ${paint('dim', `· ${event.coveredCount} covered · kept ${event.keptCount} · ${event.durationMs}ms`)}`,
+        )
+        break
+
+      case 'session.save':
+        write(
+          `  ${paint('dim', '↥')} session ${paint('dim', event.sessionId)} ${paint('dim', `· +${event.appendedCount} saved`)}`,
+        )
+        break
+
       case 'model.response':
         if (options.verbose && event.text.trim().length > 0) {
           write(`  ${paint('dim', '│')} ${truncate(event.text.trim(), maxLength * 2)}`)

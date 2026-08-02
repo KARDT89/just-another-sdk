@@ -3,7 +3,7 @@ title: Examples
 description: Runnable projects in the repository.
 ---
 
-Both examples live in the
+All six examples live in the
 [repository](https://github.com/KARDT89/just-another-sdk/tree/main/examples) and run
 against a real model. Clone it, add a key, and go:
 
@@ -134,6 +134,118 @@ a stream is that `text.delta` writes a partial line while everything else wants 
 whole one. Tracking whether the cursor is mid-line, and breaking before any
 non-delta output, is the entire trick.
 
+## 4 — Sessions
+
+A conversation that outlives the process. Run it twice and the second run — a
+different pid — still knows who you are.
+
+```bash
+pnpm example:sessions   # introduces itself
+pnpm example:sessions   # a new process, same conversation
+pnpm example:sessions -- --show    # print the stored transcript
+pnpm example:sessions -- --clear   # forget it
+```
+
+```text
+① first run
+> My name is Ada and I am building a zero-dependency agent SDK. Remember that.
+
+▶ run_msbgluny  memory-demo · openai/gpt-4o-mini
+  ↺ session demo-user · 0 messages
+  ↥ session demo-user · +2 saved
+✔ finish · 1 turn · 42 in / 11 out · 0.9s
+
+② second run
+> Without me repeating it: what is my name, and what am I building?
+
+▶ run_msbgluq5  memory-demo · openai/gpt-4o-mini
+  ↺ session demo-user · 2 messages
+  ↥ session demo-user · +2 saved
+✔ finish · 1 turn · 96 in / 19 out · 0.8s
+
+You are Ada, and you are building a zero-dependency agent SDK.
+```
+
+The persistence in that file is one line:
+
+```ts
+const agent = new Agent({
+  name: 'memory-demo',
+  model: openrouter(MODEL),
+  session: fileSession('./.sessions'), // ← the entire feature
+  context: { maxTokens: 8_000 },
+})
+
+const chat = agent.session('demo-user')
+await chat.run(input)
+```
+
+There is no message bookkeeping anywhere else in the example. See
+[Sessions](/docs/sessions).
+
+## 5 — A streaming chat server
+
+A whole chat backend in one file: token streaming, a persisted session per user,
+tool calls visible to the client, and undo.
+
+```bash
+pnpm example:server
+```
+
+```bash
+curl -N "http://localhost:8787/chat?user=ada" -d "My name is Ada."
+curl -N "http://localhost:8787/chat?user=ada" -d "What is my name?"
+curl -N "http://localhost:8787/events?user=ada" -d "Weather in Paris?"
+curl     "http://localhost:8787/history?user=ada"
+curl -X POST "http://localhost:8787/undo?user=ada"
+```
+
+The two handlers that matter are two lines each:
+
+```ts
+// plain tokens
+return agent.stream(message, { sessionId: user }).toResponse()
+
+// every event, so a UI can show "calling get_weather…"
+return agent.stream(message, { sessionId: user }).toEventResponse()
+```
+
+```text
+── /events ──────────────────────────────────────────────
+  ↳ tool.start  {"city":"Paris"}
+  ↳ tool.end    {"city":"Paris","tempC":18,"summary":"clear"}
+  ↳ run.finish  2 turns
+```
+
+The file uses `node:http`, so it bridges the web `Response` with
+`Readable.fromWeb` once. In Next.js, Hono, Bun, Deno, or Workers you would return
+it directly.
+
+## 6 — Resuming after a disconnect
+
+A run that outlives its client. The script plays the whole story out on its own:
+start, disconnect mid-stream, reconnect, finish.
+
+```bash
+pnpm example:resumable
+```
+
+```text
+① stream id: stream_msbikgj7_cf1lbz
+
+② first client reads, then drops:
+   one two three four five
+   ✂ connection lost
+
+③ reconnecting from event 7:
+   six seven eight nine ten
+
+④ full text: "one two three four five six seven eight nine ten"
+```
+
+The text is continuous across the reconnect — nothing repeated, nothing missing.
+See [Resuming a stream](/docs/streaming#resuming-a-stream).
+
 ## Patterns worth copying
 
 ### A shared agent in a server route
@@ -151,20 +263,21 @@ export const agent = new Agent({
 import { agent } from '@/lib/agent'
 
 export async function POST(request: Request) {
-  const { message, history } = await request.json()
+  const { message, userId } = await request.json()
 
   const result = await agent.run(message, {
-    messages: history,
+    sessionId: userId, // history loads and saves itself
     signal: request.signal, // cancels if the client disconnects
     timeoutMs: 60_000,
   })
 
-  return Response.json({ reply: result.output, history: result.messages })
+  return Response.json({ reply: result.output })
 }
 ```
 
 One agent instance, created once, serving concurrent requests — safe because
-`Agent` holds no mutable state.
+`Agent` holds no mutable state. Give it a `session` store and the route stops
+carrying transcripts entirely; see [Sessions](/docs/sessions).
 
 ### Per-user model tiers
 

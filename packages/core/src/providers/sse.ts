@@ -6,9 +6,8 @@
  * Only the framing is shared, so only the framing lives here.
  *
  * Implements the parts of the WHATWG event-stream grammar that real providers
- * actually use. `id:` and `retry:` are parsed and discarded — this is a
- * request/response stream, not a reconnecting `EventSource`, so there is nothing
- * to resume.
+ * actually use. `retry:` is parsed and discarded — no provider stream reconnects
+ * on its own.
  */
 
 /** One dispatched event. Frames carrying no `data` are never surfaced. */
@@ -17,6 +16,13 @@ export interface SseEvent {
   readonly event: string | undefined
   /** Concatenated `data:` lines, joined with `\n`. Never empty. */
   readonly data: string
+  /**
+   * The `id:` field, when present.
+   *
+   * No provider sets it, but this SDK's own `toEventResponse()` does — it is the
+   * event's index in the run, and it is what a reconnecting client resumes from.
+   */
+  readonly id: string | undefined
 }
 
 /**
@@ -94,6 +100,7 @@ function decodeFrame(frame: string): SseEvent | undefined {
   if (frame.length === 0) return undefined
 
   let event: string | undefined
+  let id: string | undefined
   const data: string[] = []
 
   for (const line of frame.split('\n')) {
@@ -110,11 +117,12 @@ function decodeFrame(frame: string): SseEvent | undefined {
 
     if (field === 'data') data.push(value)
     else if (field === 'event') event = value
-    // `id` and `retry` are meaningful only for reconnecting clients.
+    else if (field === 'id') id = value
+    // `retry` only matters to a client that reconnects on its own.
   }
 
   if (data.length === 0) return undefined
 
   // Multi-line `data:` fields join with a newline — legal, and Gemini uses it.
-  return { event, data: data.join('\n') }
+  return { event, data: data.join('\n'), id }
 }

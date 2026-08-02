@@ -1,6 +1,13 @@
 import type { AgentConfig, AgentInput, RunOptions } from '../agent/types.js'
 import { AbortError, ConfigurationError, toAgentError } from '../errors/errors.js'
 import type { AgentEvent } from '../events/events.js'
+import {
+  eventsToReadableStream,
+  streamHeaders,
+  textToReadableStream,
+  type EventStreamOptions,
+} from '../http/to-stream.js'
+import { createRunId } from '../util/id.js'
 import { AsyncQueue } from './async-queue.js'
 import type { RunResult } from './result.js'
 import { executeRun } from './runner.js'
@@ -31,6 +38,13 @@ import { executeRun } from './runner.js'
 export interface StreamedRun<TOutput = string>
   extends AsyncIterable<AgentEvent>, PromiseLike<RunResult<TOutput>> {
   /**
+   * This run's id, available immediately — before the first event, before the
+   * first token. It is the same `runId` that appears on every event and on the
+   * final `RunResult`.
+   */
+  readonly runId: string
+
+  /**
    * The final result as a real promise, for `.catch()` and `.finally()`, which
    * `PromiseLike` does not provide.
    */
@@ -41,6 +55,54 @@ export interface StreamedRun<TOutput = string>
    * single iteration as the event stream — use one or the other.
    */
   textStream(): AsyncIterable<string>
+
+  /**
+   * The streamed text as a web `ReadableStream` of UTF-8 bytes — the shape the
+   * platform actually takes.
+   *
+   * ```ts
+   * return new Response(agent.stream(prompt).toTextStream())
+   * ```
+   *
+   * Cancelling the stream aborts the run, so a client that hangs up stops the
+   * work rather than leaving a model call running and billing.
+   *
+   * In Node, bridge it once at the edge:
+   *
+   * ```ts
+   * import { Readable } from 'node:stream'
+   * Readable.fromWeb(agent.stream(prompt).toTextStream()).pipe(process.stdout)
+   * ```
+   */
+  toTextStream(): ReadableStream<Uint8Array>
+
+  /**
+   * The whole route handler.
+   *
+   * ```ts
+   * export async function POST(req: Request) {
+   *   const { message, userId } = await req.json()
+   *   return agent.stream(message, { sessionId: userId }).toResponse()
+   * }
+   * ```
+   *
+   * Sets `content-type: text/plain; charset=utf-8`, `cache-control: no-store`,
+   * `x-accel-buffering: no` so proxies do not swallow the stream, and `x-run-id`
+   * for trace correlation. Anything in `init` wins.
+   */
+  toResponse(init?: ResponseInit): Response
+
+  /**
+   * Every event as `text/event-stream`, for a UI that shows more than text —
+   * "calling get_weather…", a retry notice, the final token count.
+   *
+   * Read it back with `readEventStream(response)`. Payloads are redacted before
+   * they leave the process, and `model.request` is withheld by default.
+   */
+  toEventStream(options?: EventStreamOptions): ReadableStream<Uint8Array>
+
+  /** {@link toEventStream} as a `Response`, with `content-type: text/event-stream`. */
+  toEventResponse(init?: ResponseInit & EventStreamOptions): Response
 
   /** Abandon the run: the in-flight model call and any running tools are aborted. */
   abort(reason?: string): void
@@ -61,6 +123,10 @@ export function streamAgent<TOutput = string>(
 ): StreamedRun<TOutput> {
   const queue = new AsyncQueue<AgentEvent>()
   const controller = new AbortController()
+
+  // Minted here rather than inside the loop: `toResponse()` has to put it in a
+  // header synchronously, long before the run emits anything.
+  const runId = options.runId ?? createRunId()
 
   // The caller's signal and `.abort()` compose: either one cancels the run.
   const callerSignal = options.signal
@@ -92,7 +158,7 @@ export function streamAgent<TOutput = string>(
         options.onEvent?.(event)
       },
     },
-    { streaming: true },
+    { streaming: true, runId },
   ).then(
     (result) => {
       queue.close()
@@ -126,28 +192,72 @@ export function streamAgent<TOutput = string>(
     return queue[Symbol.asyncIterator]()
   }
 
+  const abort = (reason?: string): void => {
+    controller.abort(new AbortError(reason ?? 'The streamed run was aborted.'))
+  }
+
+  const textStream = (): AsyncIterable<string> => {
+    const events = iterate()
+    return {
+      async *[Symbol.asyncIterator]() {
+        for (;;) {
+          const next = await events.next()
+          if (next.done) return
+          if (next.value.type === 'text.delta') yield next.value.delta
+        }
+      },
+    }
+  }
+
+  const eventStream = (): AsyncIterable<AgentEvent> => ({ [Symbol.asyncIterator]: iterate })
+
   return {
+    runId,
     completed,
 
     then: (onFulfilled, onRejected) => completed.then(onFulfilled, onRejected),
 
     [Symbol.asyncIterator]: iterate,
 
-    textStream(): AsyncIterable<string> {
-      const events = iterate()
-      return {
-        async *[Symbol.asyncIterator]() {
-          for (;;) {
-            const next = await events.next()
-            if (next.done) return
-            if (next.value.type === 'text.delta') yield next.value.delta
-          }
-        },
-      }
+    textStream,
+
+    toTextStream(): ReadableStream<Uint8Array> {
+      // Cancelling the response body aborts the run: a browser that closed the
+      // tab should not keep a model call alive at your expense.
+      return textToReadableStream(textStream(), () => {
+        abort('The response stream was cancelled by the consumer.')
+      })
     },
 
-    abort(reason?: string): void {
-      controller.abort(new AbortError(reason ?? 'The streamed run was aborted.'))
+    toResponse(init?: ResponseInit): Response {
+      return new Response(this.toTextStream(), {
+        ...init,
+        headers: streamHeaders('text/plain; charset=utf-8', runId, init),
+      })
     },
+
+    toEventStream(streamOptions?: EventStreamOptions): ReadableStream<Uint8Array> {
+      return eventsToReadableStream(
+        eventStream(),
+        () => {
+          abort('The response stream was cancelled by the consumer.')
+        },
+        streamOptions,
+      )
+    },
+
+    toEventResponse(init?: ResponseInit & EventStreamOptions): Response {
+      const { include, fromIndex, ...responseInit } = init ?? {}
+      const streamOptions: EventStreamOptions = {
+        ...(include !== undefined ? { include } : {}),
+        ...(fromIndex !== undefined ? { fromIndex } : {}),
+      }
+      return new Response(this.toEventStream(streamOptions), {
+        ...responseInit,
+        headers: streamHeaders('text/event-stream', runId, responseInit),
+      })
+    },
+
+    abort,
   }
 }

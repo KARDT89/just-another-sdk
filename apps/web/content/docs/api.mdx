@@ -3,7 +3,7 @@ title: API reference
 description: Every export, grouped by entry point.
 ---
 
-The package has three entry points. Anything not listed here is internal and may
+The package has seven entry points. Anything not listed here is internal and may
 change in a patch release.
 
 ## `just-another-sdk`
@@ -12,7 +12,8 @@ change in a patch release.
 
 | Export            | Kind     | Description                                                                                                                                               |
 | ----------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Agent`           | class    | The agent. `new Agent(config)`, `.run()`, `.stream()`, `.clone()`, `.withTools()`                                                                         |
+| `Agent`           | class    | `new Agent(config)`, `.run()`, `.stream()`, `.session()`, `.resumable()`, `.resume()`, `.clone()`, `.withTools()`                                         |
+| `AgentSession`    | type     | What `.session(id)` returns: `run`, `stream`, `messages()`, `pop()`, `clear()`, `store`                                                                   |
 | `run`             | function | `run(config, input, options)` — shorthand for a one-shot agent                                                                                            |
 | `runAgent`        | function | The loop itself, if you want it without the `Agent` wrapper                                                                                               |
 | `AGENT_DEFAULTS`  | const    | `maxTurns: 10`, `toolTimeoutMs: 30000`, `modelTimeoutMs: 120000`, `onToolError: 'return'`, `maxRetries: 2`, `retryDelayMs: 250`, `maxRetryDelayMs: 10000` |
@@ -43,12 +44,53 @@ change in a patch release.
 
 ### Streaming
 
-| Export        | Kind     | Description                                                                 |
-| ------------- | -------- | --------------------------------------------------------------------------- |
-| `streamAgent` | function | `streamAgent(config, input, options)` — the functional form of `.stream()`  |
-| `StreamedRun` | type     | Async-iterable **and** awaitable. `.completed`, `.textStream()`, `.abort()` |
+| Export        | Kind     | Description                                                                                                                                                         |
+| ------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `streamAgent` | function | `streamAgent(config, input, options)` — the functional form of `.stream()`                                                                                          |
+| `StreamedRun` | type     | Async-iterable **and** awaitable. `.runId`, `.completed`, `.textStream()`, `.toTextStream()`, `.toResponse()`, `.toEventStream()`, `.toEventResponse()`, `.abort()` |
 
 See [Streaming](/docs/streaming).
+
+### Streaming over HTTP
+
+| Export                   | Kind     | Description                                              |
+| ------------------------ | -------- | -------------------------------------------------------- |
+| `readEventStream`        | function | Client side: parses `toEventResponse()` back into events |
+| `ReadEventStreamOptions` | type     | `{ cursor }` — tracks the last `id:` for reconnecting    |
+| `EventStreamOptions`     | type     | `include`, `fromIndex`                                   |
+
+### Resumable streams
+
+| Export              | Kind     | Description                                       |
+| ------------------- | -------- | ------------------------------------------------- |
+| `memoryStreamStore` | function | Bounded in-memory recordings. One process only    |
+| `StreamStore`       | type     | `append`, `read`, `finish`, `status`              |
+| `StreamStatus`      | type     | `{ count, done, outcome? }`                       |
+| `StreamOutcome`     | type     | `'finish' \| 'error'`                             |
+| `ResumableRun`      | type     | What `.resumable()` returns                       |
+| `ResumableOptions`  | type     | `RunOptions` plus `streamId`                      |
+| `FollowOptions`     | type     | `startTimeoutMs`, `idleTimeoutMs`, plus the above |
+
+The Redis adapter is in [`just-another-sdk/streams`](#just-another-sdkstreams).
+
+### Sessions
+
+| Export                 | Kind     | Description                                                       |
+| ---------------------- | -------- | ----------------------------------------------------------------- |
+| `memorySession`        | function | Bounded in-memory store. `{ maxSessions, maxMessagesPerSession }` |
+| `SessionStore`         | type     | `load(id, options?)`, `append`, `clear`, and optional `pop`       |
+| `LoadOptions`          | type     | `{ limit }` — a hint the store may honour                         |
+| `ContextPolicy`        | type     | `maxMessages`, `maxTokens`, `countTokens`, `summarize`            |
+| `SummarizeOptions`     | type     | `model`, `prompt`, `keepRecent`, `maxOutputTokens`, `timeoutMs`   |
+| `trimHistory`          | function | Applies a `ContextPolicy` to a message list                       |
+| `estimateTokens`       | function | The default `characters / 4` estimator                            |
+| `isSummaryMessage`     | function | Whether a message is a stored recap                               |
+| `MemorySessionOptions` | type     |                                                                   |
+
+Configured as `session` and `context` on `AgentConfig`, and `sessionId` on
+`RunOptions`. The backed adapters are in
+[`just-another-sdk/sessions`](#just-another-sdksessions). See
+[Sessions](/docs/sessions).
 
 ### Reliability
 
@@ -61,18 +103,21 @@ See [Errors → Retries](/docs/errors#retries).
 
 ### Events
 
-| Export                            | Kind     | Description                                          |
-| --------------------------------- | -------- | ---------------------------------------------------- |
-| `consoleTracer`                   | function | Ready-made listener that prints a readable trace     |
-| `ConsoleTracerOptions`            | type     | `verbose`, `color`, `write`, `maxValueLength`        |
-| `EventEmitter`                    | class    | The run's event bus                                  |
-| `AgentEvent`                      | type     | Union of every event                                 |
-| `AgentEventType`                  | type     | `'run.start' \| 'model.request' \| …`                |
-| `EventOfType<T>`                  | type     | Narrows `AgentEvent` by `type`                       |
-| `EventListener`                   | type     | `(event: AgentEvent) => void`                        |
-| `RunStartEvent` … `RunErrorEvent` | type     | Individual event shapes                              |
-| `ModelRetryEvent`                 | type     | `attempt`, `maxAttempts`, `delayMs`, `discardedText` |
-| `ModelFallbackEvent`              | type     | `fromModelId`, `toModelId`, `index`, `error`         |
+| Export                            | Kind     | Description                                              |
+| --------------------------------- | -------- | -------------------------------------------------------- |
+| `consoleTracer`                   | function | Ready-made listener that prints a readable trace         |
+| `ConsoleTracerOptions`            | type     | `verbose`, `color`, `write`, `maxValueLength`            |
+| `EventEmitter`                    | class    | The run's event bus                                      |
+| `AgentEvent`                      | type     | Union of every event                                     |
+| `AgentEventType`                  | type     | `'run.start' \| 'model.request' \| …`                    |
+| `EventOfType<T>`                  | type     | Narrows `AgentEvent` by `type`                           |
+| `EventListener`                   | type     | `(event: AgentEvent) => void`                            |
+| `RunStartEvent` … `RunErrorEvent` | type     | Individual event shapes                                  |
+| `ModelRetryEvent`                 | type     | `attempt`, `maxAttempts`, `delayMs`, `discardedText`     |
+| `ModelFallbackEvent`              | type     | `fromModelId`, `toModelId`, `index`, `error`             |
+| `SessionLoadEvent`                | type     | `sessionId`, `messageCount`, `droppedCount`, `truncated` |
+| `SessionSummarizeEvent`           | type     | `coveredCount`, `foldedCount`, `keptCount`, `error?`     |
+| `SessionSaveEvent`                | type     | `sessionId`, `appendedCount`                             |
 
 ### Errors
 
@@ -140,6 +185,47 @@ Re-exported from the root so writing a provider needs only one import:
 | `compatible(modelId, options)`                                                      | Any OpenAI-compatible endpoint           |
 | `createOpenAICompatibleProvider(config)`                                            | The shared transport, for building on    |
 | `OpenRouterOptions`, `OpenAIOptions`, `CompatibleOptions`, `OpenAICompatibleConfig` | types                                    |
+
+## `just-another-sdk/sessions`
+
+Runtime-neutral: every adapter here takes a client you already have, so nothing
+in this entry point imports a Node builtin.
+
+| Export                                                                                                                | Description                                               |
+| --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `redisSession(client \| options)`                                                                                     | `node-redis` or `ioredis`, detected                       |
+| `postgresSession(client \| options)`                                                                                  | `pg`, `postgres.js`, Drizzle, Prisma, or a query function |
+| `drizzleSession(db \| options)`                                                                                       | Drizzle, via `db.$client`                                 |
+| `prismaSession(client \| options)`                                                                                    | Prisma, via `$queryRawUnsafe` / `$executeRawUnsafe`       |
+| `memorySession`, `trimHistory`, `estimateTokens`                                                                      | Re-exported from the root                                 |
+| `assertValidSessionId`                                                                                                | The guard every adapter applies to an untrusted id        |
+| `SessionStore`, `ContextPolicy`                                                                                       | types                                                     |
+| `RedisClient`, `NodeRedisLike`, `IoRedisLike`, `RedisSessionOptions`                                                  | types                                                     |
+| `PostgresClient`, `PgClientLike`, `PostgresJsLike`, `PrismaLike`, `DrizzleLike`, `SqlQuery`, `PostgresSessionOptions` | types                                                     |
+
+## `just-another-sdk/sessions/file`
+
+| Export                        | Description                                 |
+| ----------------------------- | ------------------------------------------- |
+| `fileSession(dir \| options)` | One JSONL file per session. Needs `node:fs` |
+| `FileSessionOptions`          | type                                        |
+
+## `just-another-sdk/sessions/sqlite`
+
+| Export                           | Description                             |
+| -------------------------------- | --------------------------------------- |
+| `sqliteSession(path \| options)` | Needs `node:sqlite`, so **Node ≥ 22.5** |
+| `SqliteSessionOptions`           | type                                    |
+
+## `just-another-sdk/streams`
+
+| Export                                                                                              | Description                                      |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `memoryStreamStore(options?)`                                                                       | Default recordings store. One process only       |
+| `redisStreamStore(client \| options)`                                                               | Multi-instance. `node-redis` or `ioredis`        |
+| `startResumable`, `resumeStream`                                                                    | Functional forms of `.resumable()` / `.resume()` |
+| `StreamStore`, `StreamStatus`, `StreamOutcome`, `ResumableRun`, `ResumableOptions`, `FollowOptions` | types                                            |
+| `RedisStreamClient`, `NodeRedisStreamLike`, `IoRedisStreamLike`, `RedisStreamStoreOptions`          | types                                            |
 
 ## `just-another-sdk/testing`
 

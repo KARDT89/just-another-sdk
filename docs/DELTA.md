@@ -4,11 +4,11 @@
 
 |         |                                                          |
 | ------- | -------------------------------------------------------- |
-| Step    | 2 of 8 — streaming & reliability                         |
+| Step    | 3.5 of 8 — streaming & memory, to parity and past it     |
 | Date    | 2026-08-02                                               |
 | Package | `just-another-sdk@0.1.0` — **not yet published**         |
-| Size    | 33 source files, ~5.0k lines, **0 runtime dependencies** |
-| Tests   | 132 — 120 offline (~1.6s) + 12 live                      |
+| Size    | 49 source files, ~7.9k lines, **0 runtime dependencies** |
+| Tests   | 348 — 336 offline (~2.1s) + 12 live                      |
 
 This file is rewritten at the end of every step. It is the current state of the
 project, not a changelog — release history will live in
@@ -19,8 +19,11 @@ product documentation lives in the [docs site](../apps/web/content/docs).
 
 ## What is built
 
-Grouped by the seam it occupies. Step 1 built the loop; step 2 wrapped the model
-call inside it without touching the loop's structure.
+Grouped by the seam it occupies. Step 1 built the loop, step 2 wrapped the model
+call inside it, step 3 wrapped the loop itself — history in before it starts, new
+messages out after it ends. Step 3.5 wrapped the _result_: a run is now something
+you can hand to the web platform, record, and read again. **The loop body has not
+changed since step 1.**
 
 ### Agent runtime
 
@@ -30,21 +33,40 @@ call inside it without touching the loop's structure.
 | [`run/model-call.ts`](../packages/core/src/run/model-call.ts) | Stream-vs-generate dispatch, the retry loop, the fallback chain       |
 | [`run/run-state.ts`](../packages/core/src/run/run-state.ts)   | The only mutable object in the hot path; created fresh per run        |
 | [`run/result.ts`](../packages/core/src/run/result.ts)         | `RunResult`, `RunStep`, `StopReason`                                  |
-| [`agent/agent.ts`](../packages/core/src/agent/agent.ts)       | `Agent` — immutable config, `.run()`, `.stream()`, `.clone()`         |
+| [`agent/agent.ts`](../packages/core/src/agent/agent.ts)       | `Agent` — `.run()`, `.stream()`, `.session()`, `.clone()`             |
 | [`agent/types.ts`](../packages/core/src/agent/types.ts)       | `AgentConfig`, `RunOptions`, `AGENT_DEFAULTS`                         |
 
-`runAgent` is now a thin wrapper over an internal `executeRun`, which takes one
-extra argument the public API does not expose: whether to prefer `stream()`.
-**There is exactly one loop** — `agent.stream()` is a consumer of it, not a
-parallel implementation.
+### Sessions
+
+| File                                                                  | Does                                                               |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [`sessions/store.ts`](../packages/core/src/sessions/store.ts)         | `SessionStore` — `load`, `append`, `clear`; the untrusted-id guard |
+| [`sessions/trim.ts`](../packages/core/src/sessions/trim.ts)           | `ContextPolicy`, `trimHistory`, the default token estimator        |
+| [`sessions/memory.ts`](../packages/core/src/sessions/memory.ts)       | LRU-bounded map; also the per-agent default store                  |
+| [`sessions/file.ts`](../packages/core/src/sessions/file.ts)           | JSONL per session, tolerant of a torn final line                   |
+| [`sessions/sqlite.ts`](../packages/core/src/sessions/sqlite.ts)       | `node:sqlite`, lazily imported — still zero dependencies           |
+| [`sessions/redis.ts`](../packages/core/src/sessions/redis.ts)         | Injected client; `node-redis` and `ioredis` both detected          |
+| [`sessions/postgres.ts`](../packages/core/src/sessions/postgres.ts)   | Injected client; `pg` · `postgres.js` · any query function         |
+| [`sessions/summarize.ts`](../packages/core/src/sessions/summarize.ts) | Folding aged-out history into a recap, with an explicit watermark  |
 
 ### Streaming
 
-| File                                                            | Does                                                                       |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| [`run/stream.ts`](../packages/core/src/run/stream.ts)           | `StreamedRun` — async-iterable **and** thenable; `textStream()`, `abort()` |
-| [`run/async-queue.ts`](../packages/core/src/run/async-queue.ts) | Bridges the synchronous event bus to a pulling consumer                    |
-| [`providers/sse.ts`](../packages/core/src/providers/sse.ts)     | Vendor-neutral `text/event-stream` framer                                  |
+| File                                                              | Does                                                                             |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [`run/stream.ts`](../packages/core/src/run/stream.ts)             | `StreamedRun` — iterable, thenable, and now `toResponse()` / `toEventResponse()` |
+| [`run/async-queue.ts`](../packages/core/src/run/async-queue.ts)   | Bridges the synchronous event bus to a pulling consumer                          |
+| [`providers/sse.ts`](../packages/core/src/providers/sse.ts)       | Vendor-neutral `text/event-stream` framer — now used in both directions          |
+| [`http/to-stream.ts`](../packages/core/src/http/to-stream.ts)     | Run → `ReadableStream` / SSE, redacted before it leaves the process              |
+| [`http/read-stream.ts`](../packages/core/src/http/read-stream.ts) | `readEventStream()` — the client half, anywhere `fetch` runs                     |
+
+### Resumable streams
+
+| File                                                                | Does                                                  |
+| ------------------------------------------------------------------- | ----------------------------------------------------- |
+| [`streams/store.ts`](../packages/core/src/streams/store.ts)         | `StreamStore` — `append`, `read`, `finish`, `status`  |
+| [`streams/resumable.ts`](../packages/core/src/streams/resumable.ts) | Record a run; replay-then-follow, with give-up bounds |
+| [`streams/memory.ts`](../packages/core/src/streams/memory.ts)       | LRU-bounded recordings; the per-agent default         |
+| [`streams/redis.ts`](../packages/core/src/streams/redis.ts)         | Injected client, TTL'd — the multi-instance answer    |
 
 ### Reliability
 
@@ -66,27 +88,27 @@ parallel implementation.
 
 ### Providers
 
-| File                                                                                    | Does                                                                    |
-| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| [`providers/provider.ts`](../packages/core/src/providers/provider.ts)                   | The contract: `generate()` required, `stream()` optional                |
-| [`providers/openai-compatible.ts`](../packages/core/src/providers/openai-compatible.ts) | `fetch`-based transport, now with SSE streaming. All vendor-shaped code |
-| [`providers/openrouter.ts`](../packages/core/src/providers/openrouter.ts)               | `openrouter('anthropic/claude-opus-5')`                                 |
-| [`providers/openai.ts`](../packages/core/src/providers/openai.ts)                       | `openai('gpt-5')` and `compatible()` for Groq, Ollama, vLLM, …          |
+| File                                                                                    | Does                                                               |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [`providers/provider.ts`](../packages/core/src/providers/provider.ts)                   | The contract: `generate()` required, `stream()` optional           |
+| [`providers/openai-compatible.ts`](../packages/core/src/providers/openai-compatible.ts) | `fetch`-based transport with SSE streaming. All vendor-shaped code |
+| [`providers/openrouter.ts`](../packages/core/src/providers/openrouter.ts)               | `openrouter('anthropic/claude-opus-5')`                            |
+| [`providers/openai.ts`](../packages/core/src/providers/openai.ts)                       | `openai('gpt-5')` and `compatible()` for Groq, Ollama, vLLM, …     |
 
 ### Observability
 
 | File                                                                        | Does                                                              |
 | --------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| [`events/events.ts`](../packages/core/src/events/events.ts)                 | The typed event union — **10** members                            |
+| [`events/events.ts`](../packages/core/src/events/events.ts)                 | The typed event union — **13** members                            |
 | [`events/emitter.ts`](../packages/core/src/events/emitter.ts)               | Synchronous bus; a throwing listener cannot break a run           |
 | [`events/console-tracer.ts`](../packages/core/src/events/console-tracer.ts) | Ready-made readable trace, with redaction applied before printing |
 
 ### Testing (shipped to consumers)
 
-| File                                                                            | Does                                                              |
-| ------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| [`testing/mock-provider.ts`](../packages/core/src/testing/mock-provider.ts)     | Scripted offline provider, now streaming too — no key, no network |
-| [`testing/event-collector.ts`](../packages/core/src/testing/event-collector.ts) | Records a run's events for ordering assertions                    |
+| File                                                                            | Does                                                          |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| [`testing/mock-provider.ts`](../packages/core/src/testing/mock-provider.ts)     | Scripted offline provider, streaming too — no key, no network |
+| [`testing/event-collector.ts`](../packages/core/src/testing/event-collector.ts) | Records a run's events for ordering assertions                |
 
 The suite is split by what it can prove:
 
@@ -94,18 +116,19 @@ The suite is split by what it can prove:
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | --------------------------------------- |
 | [`agent-loop`](../packages/core/test/agent-loop.test.ts) · [`tools`](../packages/core/test/tools.test.ts) · [`provider`](../packages/core/test/provider.test.ts) | 51    | no                                      |
 | [`sse`](../packages/core/test/sse.test.ts) · [`streaming`](../packages/core/test/streaming.test.ts) · [`reliability`](../packages/core/test/reliability.test.ts) | 52    | no                                      |
+| [`sessions`](../packages/core/test/sessions.test.ts) · [`trim`](../packages/core/test/trim.test.ts) · [`summarize`](../packages/core/test/summarize.test.ts)     | 174   | no                                      |
+| [`http-stream`](../packages/core/test/http-stream.test.ts) · [`resumable`](../packages/core/test/resumable.test.ts)                                              | 45    | no                                      |
 | [`secrets`](../packages/core/test/secrets.test.ts)                                                                                                               | 16    | no                                      |
 | [`live`](../packages/core/test/live.test.ts)                                                                                                                     | 12    | yes — skipped automatically without one |
 
-**Suite time went from ~300ms to ~1.6s** and the cause is worth recording:
-retries are on by default, so the three existing tests that assert a rejection on
-a retryable status (429, 500, transport failure) now make three attempts each and
-sleep two jittered backoffs. The assertions are on the final error, so they pass
-unmodified — this is the honest cost of retrying by default, not a regression.
+The session count is large because the store contract is **one test body run
+against seven adapter configurations**, and the stream-store contract against
+two. Adding a backend is a row in an array, and it is either correct against the
+same assertions or visibly not.
 
 ---
 
-## The three invariants
+## The four invariants
 
 These are the design. Every future step must preserve them, and each has tests.
 
@@ -116,71 +139,116 @@ These are the design. Every future step must preserve them, and each has tests.
    `onToolError: 'throw'` rejects.
 3. **Every turn is recorded.** `steps`, `usage`, and `messages` are complete even
    when a run stops early — so tracing is a formatter over existing data.
+4. **A streamed run and a normal run are the same run** (step 2). Same loop, same
+   ordering, same `RunResult`. Only the source of the text differs.
 
-Step 2 added a fourth, specific to streaming: **a streamed run and a normal run
-are the same run.** Same loop, same ordering, same `RunResult`, same invariants.
-The only difference is where the text comes from.
-
----
-
-## Open questions from step 1, now answered
-
-The step-1 plan left four questions deliberately open. Each is now settled, in
-code and in [`streaming.mdx`](../apps/web/content/docs/streaming.mdx).
-
-| Question              | Answer                   | Why                                                                                                                                                                                                                                                                                                         |
-| --------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Backpressure**      | Unbounded buffering      | The event bus is synchronous by contract, so blocking the producer would break every `onEvent` consumer and deadlock any handler that awaits. Real backpressure cannot reach the model anyway — you would stall a TCP window and keep paying. The buffer is already bounded by `maxTurns × maxOutputTokens` |
-| **Tool interleaving** | Tools never overlap text | Not a policy — a consequence. The stream must reach its `finish` chunk before tool calls are known, so there is no text left to stream when a tool starts                                                                                                                                                   |
-| **Partial arguments** | Withheld                 | Fragments are reassembled inside the runtime; `tool.start` fires once per call with validated input. No consumer is ever handed half a JSON object                                                                                                                                                          |
-| **Retry scope**       | Per model call           | A failed attempt is replayed with the identical request — no state to unwind, no replay machinery                                                                                                                                                                                                           |
-
-Two further decisions the plan did not anticipate:
-
-- **`Retry-After` is a floor, and one longer than `maxRetryDelayMs` is refused.**
-  Sleeping exactly what a server asks guarantees a thundering herd; blocking an
-  `await` for five minutes because a gateway said so is worse than an actionable
-  error, which still carries `retryAfterMs` so the caller can schedule it.
-- **Fallback fires on non-retryable failures too.** A 401 or an unknown model on
-  the primary is precisely when a second vendor should serve. Cancellation is the
-  one exception.
+Step 3 adds a fifth: **only a completed run is persisted.** A run that throws
+mid-turn can leave an assistant message holding tool calls whose results never
+arrived; every provider rejects that on the next request. Saving it would poison
+the session rather than preserve it. `max_turns` is a completion and does save.
 
 ---
+
+## Decisions made in step 3.5
+
+The step began as an OpenAI-parity pass and grew three features. Each choice
+below was forced by something that did not work.
+
+| Question                           | Answer                                | Why                                                                                                                                                                                                                                               |
+| ---------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Node `Readable` or web stream?** | Web `ReadableStream`                  | OpenAI ships `toTextStream({ compatibleWithNodeStreams: true })`, but matching it means importing `node:stream` into the package root, which ends the edge-runtime guarantee. A web stream works in Node too; the bridge is one line of user code |
+| **Method names**                   | Kept `load` / `append` / `clear`      | Clearer than `getItems` / `addItems`, already shipped and documented. Capability was the gap, not vocabulary — the docs carry a mapping table                                                                                                     |
+| **Where does `limit` bind?**       | A hint, not a guarantee               | A store that ignores it is slower, never wrong, because the context policy still runs. That is what makes it safe to add to an interface people have already implemented                                                                          |
+| **Summary: message or metadata?**  | A message, with an explicit watermark | Metadata needs a second place to persist and a schema change in every adapter. A message round-trips through all five for free                                                                                                                    |
+| **Following: pub/sub or polling?** | Polling, 200 ms                       | Pub/sub is lower-latency but puts a subscription in an interface that in-memory and SQL stores cannot honour. The interval is far below the gap between tokens, and Redis can special-case it later                                               |
+
+Five things the plan did not anticipate, each found by a failing test:
+
+- **A windowed read broke `droppedCount`.** Asking the store for exactly
+  `maxMessages` made a truncated read indistinguishable from a complete one, so
+  the event reported `0` for a conversation whose beginning had just been cut
+  off — precisely the silent loss it exists to expose. The fix is to ask for one
+  _more_ than the budget and report `truncated`.
+- **A windowed read also broke summarization outright.** A summary records how
+  many messages from the start of the log it replaces; computed against a window
+  that number is wrong, and the next run replays everything in between, growing
+  without bound. Summarizing now reads the full log, and says so.
+- **Folding to the budget re-summarizes every turn.** With no headroom the very
+  next turn is over the limit again and buys another model call, forever. Folds
+  now compact to half the budget (`keepRecent`).
+- **Following an unknown stream polled forever**, holding a client connection
+  open on a mistyped or expired id. Two bounds now end it — and they cover a
+  second case the store cannot report at all: a writer process that died.
+- **`memorySession` was the one adapter that threw instead of rejecting.**
+  Dropping `async` to satisfy a lint rule made a bad session id fail
+  synchronously there and asynchronously everywhere else. The rule got the
+  exemption; the contract did not.
+
+### Adapters trimmed
+
+`drizzleSession` and `prismaSession` are gone. Both were thin wrappers, and
+Drizzle's `db.execute()` takes no parameter array — a real adapter would have had
+to interpolate values into SQL. Each is now one documented line through the same
+tested path:
+
+```ts
+postgresSession(db.$client) // Drizzle
+postgresSession((sql, p) => prisma.$queryRawUnsafe(sql, ...p)) // Prisma
+```
+
+Both are still covered by the contract suite, so dropping the exports did not
+quietly drop the support.
+
+### Zero dependencies held
+
+`pg`, `postgres.js`, `redis`, and `ioredis` are **structural types only** — not
+imports, not optional peers. `node:sqlite` and `node:fs` stay behind their own
+entry points, and everything added this step (`ReadableStream`, `Response`,
+`TextEncoder`, `TextDecoder`) is a web standard available in Node 20+, Bun, Deno,
+and Workers alike. The package still installs nothing.
 
 ## Verified vs unverified
 
-| Claim                                                  | How it was checked                                 | Result         |
-| ------------------------------------------------------ | -------------------------------------------------- | -------------- |
-| Lint, format, typecheck, test, build                   | `pnpm check` across 6 workspaces                   | pass           |
-| The 78 step-1 tests still pass unmodified              | ran them with no edits                             | pass           |
-| SSE framing under adversarial chunking                 | byte-at-a-time feed, `\r` on a chunk boundary      | pass           |
-| Streaming falls back for a provider without `stream()` | asserted identical result to `.run()`              | pass           |
-| No partial tool arguments escape                       | asserted no event carries a fragment               | pass           |
-| No unhandled rejection when only iterating             | `process.on('unhandledRejection')` probe           | pass           |
-| Backoff curve                                          | stubbed `random`, exact values asserted            | pass           |
-| Cancellation during a backoff                          | elapsed ≪ the scheduled 5s delay                   | pass           |
-| Secrets survive the retry path                         | key absent from `model.retry` event and trace line | pass           |
-| **Real streaming against a real model**                | not yet — needs a key                              | **unverified** |
+| Claim                                           | How it was checked                                        | Result         |
+| ----------------------------------------------- | --------------------------------------------------------- | -------------- |
+| Lint, format, typecheck, test, build            | `pnpm check` across 9 workspaces                          | pass           |
+| The step-3 tests still pass                     | unmodified, minus the deleted Drizzle/Prisma cases        | pass           |
+| Store contract across 7 adapter configurations  | one shared test body, 12 assertions each                  | pass           |
+| Stream-store contract across 2 stores           | one shared test body                                      | pass           |
+| A conversation survives the process exiting     | ran the example twice, different pids, read the JSONL     | pass           |
+| A chat server streams, remembers, and undoes    | ran it; `curl`ed `/chat`, `/events`, `/history`, `/undo`  | pass           |
+| A disconnected client reconnects mid-answer     | ran it; text continuous across the seam, nothing repeated | pass           |
+| Text stream equals `result.text`, byte for byte | collected the `ReadableStream` and compared               | pass           |
+| Cancelling a response body aborts the run       | asserted `code: 'aborted'`                                | pass           |
+| Secrets do not reach the browser                | tool handed `sk-live-…`; absent from the SSE body         | pass           |
+| `id:` is monotonic, and survives a resume       | resumed from 3, first id was 3                            | pass           |
+| A run outlives its reader, and still saves      | reader cancelled; session held both messages              | pass           |
+| Two readers follow one run independently        | identical text from both                                  | pass           |
+| Following gives up on an unknown or dead stream | bounded, returned empty rather than hanging               | pass           |
+| A failed summary leaves the run succeeding      | summarizer threw; run answered, event carried the error   | pass           |
+| Summaries compound without ever sending two     | two folds; second built on the first                      | pass           |
+| **Real Postgres and real Redis**                | not run — adapters tested against fakes                   | **unverified** |
+| **Real streaming against a real model**         | still not run — needs a key                               | **unverified** |
 
-> **A defect the offline tests found, and one they nearly missed.**
+> **What the fakes do and do not prove.**
 >
-> Wiring retries revealed that a mid-flight cancellation was surfacing as
-> `provider_error` rather than `aborted`: a provider aborted by the run signal
-> may reject with its own transport-shaped error, which then got wrapped as an
-> unclassified provider failure. `callModel` now checks the _signal_ rather than
-> trusting the error's code, so a cancelled run is reported as cancelled whatever
-> the provider threw on its way down.
->
-> Separately, the documented escape hatch for `stream_options` — which older vLLM
-> and some Ollama builds reject with a 400 — turned out not to be reachable:
-> `compatible()` did not accept `defaultBody`. Writing the test for the documented
-> behaviour is what surfaced it. It does now.
+> The Postgres and Redis fakes implement the client interfaces the adapters
+> accept, and answer the exact statements the adapters emit. They prove the
+> adapter's own logic: command shapes, SQL shape, multi-row insert parameter
+> numbering, `{ rows }`-vs-array normalisation, jsonb parsed or not, windowed
+> reads, `pop`, and client detection. They prove nothing about either server.
 
-The one thing still unverified is the thing a mock structurally cannot prove:
-real SSE framing against a real gateway, with real keep-alives and real chunk
-boundaries. **Run `pnpm example:stream` with a key before trusting this step.**
-Step 1's live run found a bug that all 66 offline tests missed; there is no
-reason to assume step 2 is different.
+**Everything runnable without a key has been run**, including both new examples
+against the mock provider — the chat server end to end over real HTTP, and the
+resumable demo through an actual disconnect and reconnect. What remains needs a
+key:
+
+- **`pnpm example:stream`** — carried over from step 2. `examples/.env` exists but
+  the key line is commented out. Step 1's live run found a bug all 66 offline
+  tests missed.
+- **`pnpm example:sessions`, `pnpm example:server`, `pnpm example:resumable`** —
+  the mechanics are verified; what a live run adds is that a real model actually
+  uses the recalled context.
 
 ---
 
@@ -194,53 +262,58 @@ Mapped to the 12 graded categories in [`CLAUDE.md`](../CLAUDE.md).
 | 2   | Tools                         | 10    | **done**    | Built-in tool pack (step 6) is additive                                                    |
 | 3   | Handoffs                      | 10    | not started | Step 5                                                                                     |
 | 4   | Guardrails                    | 10    | **partial** | Schema validation + `onToolError` cover tool safety; no declarative guardrails or approval |
-| 5   | Memory & sessions             | 10    | **partial** | Multi-turn works via `messages`; no persistence, no storage adapters                       |
-| 6   | Structured output + streaming | 10    | **partial** | **Streaming done.** No `outputSchema` yet — step 4                                         |
+| 5   | Memory & sessions             | 10    | **done**    | 5 adapters, windowed reads, undo, trimming, summarization, events                          |
+| 6   | Structured output + streaming | 10    | **partial** | **Streaming done** — HTTP, SSE, resumable. No `outputSchema` yet — step 4                  |
 | 7   | Reliability                   | 10    | **done**    | Timeouts, cancellation, loop bounds, typed errors, retries, fallback, secret safety        |
-| 8   | Tracing                       | 5     | **partial** | `steps[]` + 10 events + console tracer; no JSON/OTel exporters                             |
+| 8   | Tracing                       | 5     | **partial** | `steps[]` + 13 events + console tracer + an SSE feed; no JSON/OTel exporters               |
 | 9   | Developer experience          | 10    | **done**    | Typed API, zero-config install, actionable errors, shipped test helpers                    |
-| 10  | Docs & examples               | 10    | **partial** | 11 pages + 3 runnable examples; 4 pages stubbed; **not yet hosted**                        |
+| 10  | Docs & examples               | 10    | **partial** | 12 pages + 6 runnable examples; 3 pages stubbed; **not yet hosted**                        |
 | 11  | Product thinking              | 10    | **done**    | Differentiation is real and demonstrable                                                   |
 | 12  | Demo & pitch                  | 10    | not started | Landing page done; **no video**                                                            |
 
-**Roughly 80–90 of 120 addressable today.** The cheapest remaining marks, in
-order: hosting the docs (category 10), the video (12), sessions (5).
+**Roughly 95–105 of 120 addressable today.** The cheapest remaining marks, in
+order: hosting the docs (category 10), the video (12), structured output (6).
 
 ---
 
-## Next step — 3 of 8: sessions & memory
+## Next step — 4 of 8: structured output
 
-The first step that adds a genuinely new concept rather than deepening an
-existing one. `Agent` is configuration and `RunState` is one run; `Session` is
-the third thing — state that outlives both.
+The other half of category 6, and the last thing standing between this SDK and
+"typed end to end". Today `RunResult<TOutput>` carries a generic that nothing
+fills in — `output` is the text, cast.
 
-- [ ] **`SessionStore` interface** — `get`, `append`, `clear`, keyed by session
-      id. Small enough that a custom adapter is a class with three methods.
-- [ ] **Adapters** — in-memory (default), file (JSONL), SQLite (`node:sqlite`,
-      so still zero dependencies), Redis (via an injected client, not a driver
-      dependency).
-- [ ] **`session` on `RunOptions`** — history loads before the run and the new
-      turns append after it, so multi-turn stops being the caller's problem.
-- [ ] **Context-window management** — trimming by turn count and by token
-      budget, then summarization of what was trimmed. This is where a long
-      conversation stops silently costing more every turn.
-- [ ] **Tests** — a conversation surviving a process restart through the file
-      adapter; concurrent runs against one session not corrupting it; trimming
-      preserving the system message and the most recent turns.
-- [ ] **Un-stub** [`sessions.mdx`](../apps/web/content/docs/sessions.mdx).
+- [ ] **`outputSchema` on `AgentConfig`** — any Standard Schema validator, the
+      same interop `tool()` already uses. `result.output` becomes `TOutput`,
+      inferred, with no cast anywhere in the call site.
+- [ ] **Provider-native JSON Schema** where the vendor supports it
+      (`response_format: { type: 'json_schema' }`), and a documented prompt-based
+      fallback where it does not.
+- [ ] **Repair-retry** — an invalid response is handed back to the model with the
+      validation errors, bounded by its own attempt ceiling and separate from the
+      transport retry in `run/retry.ts`. These must not multiply.
+- [ ] **`InvalidOutputError`** carrying `SchemaIssue[]`, so a caller sees which
+      field failed rather than "the model returned bad JSON".
+- [ ] **Streaming and structured output together** — decide whether a partial
+      object is exposed or withheld. The precedent set twice now (withhold partial
+      tool arguments; withhold `model.request` from a browser) suggests
+      withholding.
+- [ ] **Un-stub** [`structured-output.mdx`](../apps/web/content/docs/structured-output.mdx).
 
 ### Acceptance
 
-`pnpm check` green · a new `examples/04-sessions` holds a conversation across two
-separate process invocations · the existing 132 tests pass unmodified.
+`pnpm check` green · a new `examples/07-structured` extracts a typed record from
+prose and survives a deliberately malformed first response · the existing 348
+tests pass unmodified.
 
 ### Open design questions
 
-1. **Where does trimming happen** — at load, or continuously during the run?
-2. **Is a summary a message or metadata?** A message is simpler and survives a
-   round-trip; metadata is cleaner but needs its own persistence.
-3. **Concurrency** — two runs on one session: last-write-wins, optimistic
-   locking, or an explicit lock in the store contract?
+1. **Does `outputSchema` suppress tools, or compose with them?** A run that both
+   calls tools and returns a typed object is the useful case, but the final turn
+   has to be forced into the schema somehow.
+2. **Where does the repair budget live** — its own `maxOutputRetries`, or folded
+   into `maxTurns`?
+3. **Is a repair attempt a `RunStep`?** It is a model call, so invariant 3 says
+   yes; but it makes `turns` mean two different things.
 
 ---
 
@@ -248,8 +321,7 @@ separate process invocations · the existing 132 tests pass unmodified.
 
 | Step | Scope                                                                                                                                                     |
 | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 4    | **Structured output** — `outputSchema` on `AgentConfig`, provider-native JSON Schema where available, repair-retry, `InvalidOutputError`                  |
-| 5    | **Guardrails & handoffs** — input/output/tool guardrails, approval gates (needs serializable run state from step 3), delegation with cycle detection      |
+| 5    | **Guardrails & handoffs** — input/output/tool guardrails, approval gates, delegation with cycle detection                                                 |
 | 6    | **Built-in tool pack** — HTTP fetch, sandboxed filesystem, calculator, web search                                                                         |
 | 7    | **Native providers** — Anthropic Messages API and Gemini `generateContent` as siblings to the OpenAI transport (both can reuse `sse.ts`); trace exporters |
 | 8    | **Launch** — host the docs, publish, record the demo video, write the pitch                                                                               |
@@ -260,8 +332,10 @@ separate process invocations · the existing 132 tests pass unmodified.
 
 Only you can do these.
 
-- [ ] **Run `pnpm example:stream` with a real key.** The highest-value unchecked
-      box in this file — see "Verified vs unverified" above.
+- [ ] **Uncomment `OPENROUTER_API_KEY` in `examples/.env`**, then run
+      `pnpm example:stream`, `example:sessions`, `example:server`, and
+      `example:resumable`. Everything runnable without a key has already been run;
+      these are what a key adds.
 - [ ] **Publish to lock the npm name.** `just-another-sdk` is free today, but
       `zero-sdk` being taken while `zerosdk` was free shows how fast that changes.
 - [ ] **Add `NPM_TOKEN`** to GitHub → Settings → Secrets → Actions, or the release
@@ -270,6 +344,10 @@ Only you can do these.
       the monorepo build command already. Then put the URL in
       [`README.md`](../README.md) and
       [`packages/core/package.json`](../packages/core/package.json) `homepage`.
+- [ ] **Optional: verify Postgres and Redis against real servers.** A
+      `docker compose` with both, and a `live`-style suite that skips without
+      them, would close the last unverified row — it now covers `redisStreamStore`
+      as well as the session adapters.
 
 ---
 

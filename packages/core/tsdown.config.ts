@@ -5,6 +5,12 @@ export default defineConfig({
     index: 'src/index.ts',
     'providers/index': 'src/providers/index.ts',
     'testing/index': 'src/testing/index.ts',
+    // File and SQLite are separate entries so a browser or edge bundle that
+    // imports `sessions` never pulls in `node:fs` or `node:sqlite`.
+    'sessions/index': 'src/sessions/index.ts',
+    'sessions/file': 'src/sessions/file.ts',
+    'sessions/sqlite': 'src/sessions/sqlite.ts',
+    'streams/index': 'src/streams/index.ts',
   },
   format: ['esm', 'cjs'],
   dts: true,

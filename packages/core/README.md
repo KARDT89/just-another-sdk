@@ -72,7 +72,7 @@ makes agent code impossible to scale:
 | ---------- | ---------------------------------- | ----------------------------------------- |
 | `Agent`    | name, instructions, model, tools   | Created once, shared across every request |
 | `RunState` | messages, turn count, usage, steps | One run                                   |
-| `Session`  | persisted conversation             | Across runs _(coming next)_               |
+| `Session`  | persisted conversation             | Across runs                               |
 
 An `Agent` is immutable configuration, so a single instance is safe to create at
 module scope and share across concurrent users.
@@ -148,7 +148,7 @@ await agent.run('What is the weather in Paris?', { onEvent: consoleTracer() })
 ```
 
 Or handle events yourself — `run.start`, `model.request`, `model.response`,
-`tool.start`, `tool.end`, `run.finish`, `run.error`:
+`text.delta`, `tool.start`, `tool.end`, `session.*`, `run.finish`, `run.error`:
 
 ```ts
 await agent.run(prompt, {
@@ -163,11 +163,69 @@ A throwing listener can never break a run.
 
 ## Multi-turn conversations
 
-The API is stateless; pass the previous messages back to continue:
+Give a run a `sessionId` and history loads and saves itself:
+
+```ts
+await agent.run('My name is Ada.', { sessionId: 'user_123' })
+await agent.run('What is my name?', { sessionId: 'user_123' }) // "Ada"
+```
+
+With no store configured that uses a bounded in-memory one. Persist it with a
+single line — the adapter takes the client you already have:
+
+```ts
+import { fileSession } from 'just-another-sdk/sessions/file'
+import { sqliteSession } from 'just-another-sdk/sessions/sqlite'
+import { postgresSession, redisSession } from 'just-another-sdk/sessions'
+
+new Agent({
+  name: 'support',
+  model,
+  session: fileSession('./.sessions'),
+  //       sqliteSession('./chat.db')
+  //       postgresSession(pool)     — pg · postgres.js · any query function
+  //       redisSession(redis)       — node-redis · ioredis
+
+  // Bound what is sent, and fold what ages out into a recap instead of losing it
+  context: { maxTokens: 30_000, summarize: true },
+})
+```
+
+Bind a conversation for a chat UI — read a window, or undo the last turn:
+
+```ts
+const chat = agent.session('user_123')
+
+await chat.messages({ limit: 20 })
+await chat.pop() // "edit my message and regenerate"
+```
+
+Or manage the transcript yourself, as before:
 
 ```ts
 const first = await agent.run('My name is Ada.')
 const second = await agent.run('What is my name?', { messages: first.messages })
+```
+
+## Streaming to a browser
+
+```ts title="app/api/chat/route.ts"
+export async function POST(req: Request) {
+  const { message, userId } = await req.json()
+  return agent.stream(message, { sessionId: userId }).toResponse()
+}
+```
+
+`toTextStream()` is a standard web `ReadableStream`, so that works in Next.js,
+Hono, Bun, Deno, and Workers. `toEventResponse()` sends every event instead —
+tool calls, retries, usage — and `readEventStream(response)` reads it back on the
+client. Payloads are redacted on the way out.
+
+A run can also outlive the client that started it:
+
+```ts
+const run = agent.resumable(message, { sessionId: userId })
+return run.toEventResponse() // reconnect later with agent.resume(run.streamId)
 ```
 
 ## Models
@@ -240,8 +298,8 @@ optional but the whole thing is designed around it.
 
 ## Roadmap
 
-Sessions and memory adapters · structured output · guardrails and approval
-gates · multi-agent handoffs · native Anthropic and Gemini providers.
+Structured output · guardrails and approval gates · multi-agent handoffs ·
+native Anthropic and Gemini providers.
 
 ## License
 

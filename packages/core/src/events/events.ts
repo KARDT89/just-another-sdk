@@ -125,6 +125,70 @@ export interface ToolEndEvent extends EventBase {
   readonly durationMs: number
 }
 
+/**
+ * Prior conversation was loaded from a session store, before the first model
+ * call.
+ *
+ * `droppedCount` is the reason this event exists: trimming an over-budget
+ * history is the one thing the session layer does that silently changes what the
+ * model sees, and "why did it forget?" is unanswerable without it.
+ */
+export interface SessionLoadEvent extends EventBase {
+  readonly type: 'session.load'
+  readonly sessionId: string
+  /** Messages carried into the run, after trimming. */
+  readonly messageCount: number
+  /** Messages the context policy dropped from what was read. */
+  readonly droppedCount: number
+  /**
+   * The *read* was bounded, so older messages exist beyond `droppedCount`.
+   *
+   * With a `maxMessages` policy the store is asked for a window rather than the
+   * whole transcript, which makes `droppedCount` a lower bound rather than a
+   * total. This flag is how you tell "nothing was lost" from "the beginning was
+   * never fetched".
+   */
+  readonly truncated: boolean
+  readonly durationMs: number
+}
+
+/**
+ * Trimmed history was folded into a summary — or the attempt failed and plain
+ * trimming was used instead.
+ *
+ * Emitted for both outcomes on purpose. A summary is a model call the runtime
+ * makes on your behalf, so it costs money and can fail; neither should be
+ * invisible.
+ */
+export interface SessionSummarizeEvent extends EventBase {
+  readonly type: 'session.summarize'
+  readonly sessionId: string
+  /**
+   * How many messages from the start of the stored log the summary now stands in
+   * for — including any it inherited from an earlier fold.
+   *
+   * This is the number that answers "how much of this conversation is now a
+   * recap", which is what a trace is being read for. On a failed attempt it is
+   * what *would* have been covered.
+   */
+  readonly coveredCount: number
+  /** Messages compressed by this particular call. */
+  readonly foldedCount: number
+  /** Messages kept verbatim after the summary. */
+  readonly keptCount: number
+  readonly durationMs: number
+  /** Present when summarizing failed. The run continued with plain trimming. */
+  readonly error?: AgentError
+}
+
+/** This run's new messages were written back to the session store. */
+export interface SessionSaveEvent extends EventBase {
+  readonly type: 'session.save'
+  readonly sessionId: string
+  readonly appendedCount: number
+  readonly durationMs: number
+}
+
 /** The run finished. Always the last event on a successful run. */
 export interface RunFinishEvent extends EventBase {
   readonly type: 'run.finish'
@@ -144,6 +208,9 @@ export interface RunErrorEvent extends EventBase {
 
 export type AgentEvent =
   | RunStartEvent
+  | SessionLoadEvent
+  | SessionSummarizeEvent
+  | SessionSaveEvent
   | ModelRequestEvent
   | ModelResponseEvent
   | TextDeltaEvent

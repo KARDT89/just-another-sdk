@@ -121,18 +121,20 @@ onEvent: (event) => {
 
 Every event carries `id`, `timestamp`, `runId`, and `agentName`.
 
-| Type             | When                                    | Notable fields                                                |
-| ---------------- | --------------------------------------- | ------------------------------------------------------------- |
-| `run.start`      | Always first                            | `modelId`, `input`, `toolNames`                               |
-| `model.request`  | Before each model call                  | `turn`, `messageCount`, `tools`                               |
-| `model.response` | After each model call, before tools run | `text`, `toolCalls`, `finishReason`, `usage`, `durationMs`    |
-| `tool.start`     | Before a tool runs, arguments validated | `toolName`, `toolCallId`, `input`                             |
-| `tool.end`       | After a tool finishes or fails          | `result`, `isError`, `durationMs`                             |
-| `run.finish`     | Last event on a successful run          | `stopReason`, `text`, `turns`, `usage`, `durationMs`          |
-| `run.error`      | Last event when the run throws          | `error`, `turn`                                               |
-| `text.delta`     | Streamed runs only                      | `delta`                                                       |
-| `model.retry`    | A failed call will be attempted again   | `attempt`, `maxAttempts`, `error`, `delayMs`, `discardedText` |
-| `model.fallback` | The chain moved to the next provider    | `fromModelId`, `toModelId`, `index`, `error`                  |
+| Type             | When                                     | Notable fields                                                |
+| ---------------- | ---------------------------------------- | ------------------------------------------------------------- |
+| `run.start`      | Always first                             | `modelId`, `input`, `toolNames`                               |
+| `session.load`   | History loaded, before the first call    | `sessionId`, `messageCount`, `droppedCount`, `durationMs`     |
+| `model.request`  | Before each model call                   | `turn`, `messageCount`, `tools`                               |
+| `model.response` | After each model call, before tools run  | `text`, `toolCalls`, `finishReason`, `usage`, `durationMs`    |
+| `tool.start`     | Before a tool runs, arguments validated  | `toolName`, `toolCallId`, `input`                             |
+| `tool.end`       | After a tool finishes or fails           | `result`, `isError`, `durationMs`                             |
+| `session.save`   | New messages written back, on completion | `sessionId`, `appendedCount`, `durationMs`                    |
+| `run.finish`     | Last event on a successful run           | `stopReason`, `text`, `turns`, `usage`, `durationMs`          |
+| `run.error`      | Last event when the run throws           | `error`, `turn`                                               |
+| `text.delta`     | Streamed runs only                       | `delta`                                                       |
+| `model.retry`    | A failed call will be attempted again    | `attempt`, `maxAttempts`, `error`, `delayMs`, `discardedText` |
+| `model.fallback` | The chain moved to the next provider     | `fromModelId`, `toModelId`, `index`, `error`                  |
 
 For a tool-using run the order is deterministic:
 
@@ -158,6 +160,23 @@ run.finish
 
 `model.request` fires **once per turn**, not once per attempt — retries and
 fallbacks announce themselves with their own events instead.
+
+A run using a [session](/docs/sessions) brackets that sequence with two more:
+
+```text
+run.start
+  session.summarize              (only when a fold happened)
+  session.load                   (what the run actually starts with)
+  model.request → model.response
+  session.save                   (immediately before run.finish)
+run.finish
+```
+
+`session.load` is emitted _after_ any summarizing, so its counts describe the
+history the run really begins with rather than an intermediate state.
+
+`session.save` does not fire on a run that throws — nothing is persisted, on
+purpose. See [what gets saved, and when](/docs/sessions#what-gets-saved-and-when).
 
 ### Undoing discarded text
 

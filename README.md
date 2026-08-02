@@ -87,8 +87,12 @@ pnpm check            # format:check + lint + typecheck + test + build
 
 ```bash
 echo "OPENROUTER_API_KEY=sk-or-v1-..." > examples/.env
-pnpm example:hello    # a minimal agent
-pnpm example:tools    # tools, parallel calls, failure recovery, tracing
+pnpm example:hello     # a minimal agent
+pnpm example:tools     # tools, parallel calls, failure recovery, tracing
+pnpm example:stream    # token streaming, cancellation, model fallback
+pnpm example:sessions  # a conversation that survives the process exiting
+pnpm example:server    # a streaming chat backend with sessions and undo
+pnpm example:resumable # a run that outlives a disconnected client
 ```
 
 ### Testing
@@ -111,8 +115,8 @@ pnpm --filter just-another-sdk test:coverage
 
 ## Roadmap
 
-Streaming · sessions and memory adapters · structured output · guardrails and
-approval gates · multi-agent handoffs · native Anthropic and Gemini providers.
+Structured output · guardrails and approval gates · multi-agent handoffs ·
+native Anthropic and Gemini providers.
 
 Each is designed and documented under **Coming next** in the docs, so the intended
 API is visible before it ships.

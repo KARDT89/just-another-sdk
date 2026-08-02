@@ -2,6 +2,9 @@ import type { AgentError } from '../errors/errors.js'
 import type { ModelProvider, ToolChoice } from '../providers/provider.js'
 import type { AnyTool } from '../tools/tool.js'
 import type { AgentEvent } from '../events/events.js'
+import type { SessionStore } from '../sessions/store.js'
+import type { StreamStore } from '../streams/store.js'
+import type { ContextPolicy } from '../sessions/trim.js'
 import type { ModelMessage } from '../types/messages.js'
 
 /**
@@ -95,6 +98,42 @@ export interface AgentConfig {
    */
   readonly fallbacks?: readonly ModelProvider[]
 
+  /**
+   * Where conversations are persisted between runs.
+   *
+   * Pair it with a `sessionId` on the run and multi-turn stops being your
+   * problem — history is loaded before the loop and the new turns are appended
+   * after it:
+   *
+   * ```ts
+   * const agent = new Agent({ name: 'support', model, session: fileSession('./.sessions') })
+   *
+   * await agent.run('My name is Ada.',  { sessionId: 'user_123' })
+   * await agent.run('What is my name?', { sessionId: 'user_123' })   // "Ada"
+   * ```
+   *
+   * Omit it and a `sessionId` still works, against a bounded in-memory store
+   * created for this agent — enough for a prototype, gone on restart.
+   */
+  readonly session?: SessionStore
+
+  /**
+   * How much prior conversation to carry into a run. Without one, a long session
+   * costs more every turn until the provider rejects the request.
+   *
+   * Applies to `options.messages` too, so it is useful without a session store.
+   */
+  readonly context?: ContextPolicy
+
+  /**
+   * Where resumable runs record themselves, for {@link Agent.resumable}.
+   *
+   * Omit it and resumable runs still work, against a bounded in-memory store
+   * owned by this agent — correct for one process, silently wrong behind a load
+   * balancer. Use `redisStreamStore(client)` there.
+   */
+  readonly streams?: StreamStore
+
   /** Free-form tags passed to providers that support them, and to traces. */
   readonly metadata?: Readonly<Record<string, string>>
 }
@@ -105,8 +144,25 @@ export interface RunOptions {
    * Prior conversation to continue. Pass `previousResult.messages` for a
    * multi-turn chat. The system message is re-derived, so strip it or leave it —
    * either works.
+   *
+   * Mutually exclusive with {@link RunOptions.sessionId}: passing both would
+   * concatenate two versions of the same conversation, so it throws instead.
    */
   readonly messages?: readonly ModelMessage[]
+
+  /**
+   * Continue a persisted conversation. History is loaded before the run and this
+   * run's new messages are appended after it.
+   *
+   * ```ts
+   * await agent.run('My name is Ada.',  { sessionId: 'user_123' })
+   * await agent.run('What is my name?', { sessionId: 'user_123' })
+   * ```
+   *
+   * Uses {@link AgentConfig.session}, or a bounded in-memory store when the agent
+   * has none.
+   */
+  readonly sessionId?: string
 
   /** Cancels the run: in-flight model call and pending tools are aborted. */
   readonly signal?: AbortSignal
@@ -128,6 +184,14 @@ export interface RunOptions {
    * listener is swallowed so instrumentation can never break a run.
    */
   readonly onEvent?: (event: AgentEvent) => void
+
+  /**
+   * Use this id for the run instead of a generated one.
+   *
+   * For correlating a run with a request id you already have. It must be unique
+   * per run — reusing one makes two runs indistinguishable in a trace.
+   */
+  readonly runId?: string
 
   /** Merged over {@link AgentConfig.metadata}. */
   readonly metadata?: Readonly<Record<string, string>>

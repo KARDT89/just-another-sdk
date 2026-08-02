@@ -1,0 +1,19 @@
+{
+  "name": "example-sessions",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A conversation that survives the process exiting, stored as JSONL on disk.",
+  "scripts": {
+    "start": "node --env-file-if-exists=../.env --import tsx index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "just-another-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "tsx": "^4.20.6",
+    "typescript": "^6.0.3"
+  }
+}

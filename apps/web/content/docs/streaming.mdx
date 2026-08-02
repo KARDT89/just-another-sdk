@@ -34,6 +34,154 @@ for await (const chunk of agent.stream(prompt).textStream()) {
 `textStream()` consumes the same single iteration as the event stream — use one
 or the other, not both.
 
+## Streaming to a browser
+
+`toResponse()` is the whole route handler:
+
+```ts title="app/api/chat/route.ts"
+export async function POST(req: Request) {
+  const { message, userId } = await req.json()
+  return agent.stream(message, { sessionId: userId }).toResponse()
+}
+```
+
+That works in Next.js, Hono, Bun, Deno, and Cloudflare Workers, because
+`toTextStream()` returns a standard web `ReadableStream` and `toResponse()` wraps
+it in a standard `Response`. Sensible headers come with it —
+`text/plain; charset=utf-8`, `cache-control: no-store`, `x-accel-buffering: no`
+so a proxy does not swallow the stream, and `x-run-id` for correlating a trace.
+Anything you pass in `init` wins.
+
+**Cancelling the response body aborts the run.** A browser closing the tab should
+not leave a model call running and billing.
+
+### In Node
+
+`node:http` predates `Response`, so bridge the body once at the edge:
+
+```ts
+import { Readable } from 'node:stream'
+
+Readable.fromWeb(agent.stream(prompt).toTextStream()).pipe(process.stdout)
+```
+
+The SDK does not do this for you: importing `node:stream` into the package root
+would break the guarantee that it runs on an edge runtime, and a web
+`ReadableStream` already works everywhere including Node.
+
+### Events, not just text
+
+Text alone cannot render "calling `get_weather`…". `toEventResponse()` sends
+every event as `text/event-stream`, and `readEventStream()` reads it back:
+
+```ts title="server"
+return agent.stream(message, { sessionId: userId }).toEventResponse()
+```
+
+```ts title="browser"
+import { readEventStream } from 'just-another-sdk'
+
+const response = await fetch('/api/chat', { method: 'POST', body })
+
+for await (const event of readEventStream(response)) {
+  if (event.type === 'text.delta') ui.append(event.delta)
+  if (event.type === 'tool.start') ui.showSpinner(event.toolName)
+  if (event.type === 'run.finish') ui.done(event.usage)
+}
+```
+
+Two things happen on the way out, because these bytes leave your server:
+
+- **Payloads are redacted**, the same treatment [`consoleTracer`](/docs/events)
+  applies before printing. A tool that handles credentials does not leak them to
+  a client.
+- **`model.request` is withheld** by default — it carries your full tool JSON
+  Schemas. Pass `include` to choose exactly what to send:
+
+```ts
+stream.toEventResponse({ include: ['text.delta', 'tool.start', 'run.finish'] })
+```
+
+Each event carries an `id:` — its index in the run. That is not decoration; it is
+what [resuming](#resuming-a-stream) is built on.
+
+## Resuming a stream
+
+A client that loses its connection mid-generation normally loses the answer. It
+also loses more than that: an ordinary run wired to `request.signal` is
+_cancelled_ on disconnect, and since [only a completed run is
+persisted](/docs/sessions#what-gets-saved-and-when), the exchange the user
+already watched arrive is never saved.
+
+`agent.resumable()` records the run as it happens, so it survives the reader:
+
+```ts title="start"
+const run = agent.resumable(message, { sessionId: userId })
+return run.toEventResponse() // includes x-stream-id
+```
+
+```ts title="reconnect — a different request, possibly a different instance"
+const from = Number(req.headers.get('last-event-id') ?? -1) + 1
+return agent.resume(streamId, { fromIndex: from }).toEventResponse()
+```
+
+In a browser this is free: `EventSource` sends `Last-Event-ID` automatically on
+reconnect, and the `id:` field from the previous section is what it echoes.
+
+Note what is **not** passed to `resumable()`: `request.signal`. Cancelling on
+disconnect is the behaviour it exists to avoid. To stop one early, use an
+`AbortSignal` you control.
+
+Any number of readers can follow the same run, join late, or read it after it has
+finished — they all read the recording, not the run.
+
+### Where recordings live
+
+| Store                      | Use                                             |
+| -------------------------- | ----------------------------------------------- |
+| `memoryStreamStore()`      | Default. One process only                       |
+| `redisStreamStore(client)` | Multi-instance. From `just-another-sdk/streams` |
+
+```ts
+import { redisStreamStore } from 'just-another-sdk/streams'
+
+const agent = new Agent({
+  name: 'chat',
+  model,
+  streams: redisStreamStore(redis),
+})
+```
+
+<Callout type="warn">
+  The in-memory store is **silently wrong behind a load balancer**: a reconnect
+  landing on another instance finds nothing and sees an empty stream. Use Redis
+  the moment there is more than one process.
+</Callout>
+
+Recordings are transient — `redisStreamStore` expires them after an hour by
+default (`ttlSeconds`), and the in-memory one bounds itself by stream count.
+
+### Following gives up rather than hanging
+
+An unknown stream id — expired, mistyped, or on another instance — is
+indistinguishable from a run that has not emitted yet, so a follower cannot wait
+forever:
+
+| Bound            | Default | Fires when                                       |
+| ---------------- | ------- | ------------------------------------------------ |
+| `startTimeoutMs` | 5_000   | The stream has produced nothing at all           |
+| `idleTimeoutMs`  | 60_000  | A started stream stops producing — a dead writer |
+
+Both end the stream cleanly rather than throwing: from a client's point of view a
+dead stream and a finished one look the same, and an error would misreport a run
+that may well have succeeded.
+
+**It polls**, every 200 ms. Redis pub/sub would be lower-latency but would tie
+following to one backend and put a subscription in the interface that in-memory
+and SQL stores cannot honour. The interval is well under the gap between tokens,
+and a pub/sub fast path can go inside `redisStreamStore` later without the
+interface changing.
+
 ## It is the same loop
 
 `stream()` is not a parallel implementation of the agent loop. It runs the
@@ -178,11 +326,30 @@ policy itself.
 
 | Member                     | Description                                                       |
 | -------------------------- | ----------------------------------------------------------------- |
+| `.runId`                   | Available immediately, before the first token.                    |
 | `[Symbol.asyncIterator]()` | Yields every `AgentEvent`. Once per run.                          |
 | `await stream`             | The final `RunResult`.                                            |
 | `.completed`               | The same result as a real `Promise`, for `.catch()`/`.finally()`. |
 | `.textStream()`            | Yields only `text.delta` strings.                                 |
+| `.toTextStream()`          | The text as a web `ReadableStream<Uint8Array>`.                   |
+| `.toResponse(init?)`       | That stream as a `Response`, with streaming-safe headers.         |
+| `.toEventStream(options?)` | Every event as `text/event-stream`.                               |
+| `.toEventResponse(init?)`  | That stream as a `Response`.                                      |
 | `.abort(reason?)`          | Cancels the run: the model call and any running tools.            |
+
+All five consumers share one iteration — the **one consumer per run** rule covers
+them together.
 
 `streamAgent(config, input, options)` is the functional form, for when an `Agent`
 instance would not be reused.
+
+### Resumable runs
+
+| Member                             | Description                                                                                         |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `agent.resumable(input, options?)` | Starts a recorded run. Returns `streamId`, `runId`, `completed`, `toEventStream`, `toEventResponse` |
+| `agent.resume(streamId, options?)` | Re-attaches: replays, then follows                                                                  |
+| `StreamStore`                      | `append`, `read`, `finish`, `status`                                                                |
+
+`readEventStream(response, { cursor })` is the client side; the cursor tracks the
+last `id:` seen so a reconnect knows where to start.

@@ -9,11 +9,11 @@ Most agent code becomes unmaintainable for one reason: configuration,
 per-run state, and persisted history get mixed into a single mutable object. This
 SDK keeps them apart.
 
-|            | Holds                                    | Lifetime                                  |
-| ---------- | ---------------------------------------- | ----------------------------------------- |
-| `Agent`    | name, instructions, model, tools, limits | Created once, shared across every request |
-| `RunState` | messages, turn count, usage, steps       | One run                                   |
-| `Session`  | persisted conversation                   | Across runs _(coming next)_               |
+|            | Holds                                    | Lifetime                                     |
+| ---------- | ---------------------------------------- | -------------------------------------------- |
+| `Agent`    | name, instructions, model, tools, limits | Created once, shared across every request    |
+| `RunState` | messages, turn count, usage, steps       | One run                                      |
+| `Session`  | persisted conversation                   | Across runs — see [Sessions](/docs/sessions) |
 
 Because an `Agent` is immutable, one instance is safe to create at module scope
 and share across concurrent users:
@@ -31,10 +31,10 @@ export const supportAgent = new Agent({
 import { supportAgent } from '@/lib/agent'
 
 export async function POST(request: Request) {
-  const { message, history } = await request.json()
+  const { message, userId } = await request.json()
   // Safe under concurrency: nothing here mutates the agent.
-  const result = await supportAgent.run(message, { messages: history })
-  return Response.json({ reply: result.output, history: result.messages })
+  const result = await supportAgent.run(message, { sessionId: userId })
+  return Response.json({ reply: result.output })
 }
 ```
 
@@ -94,6 +94,16 @@ export async function POST(request: Request) {
       type: "'auto' | 'required' | 'none' | { type: 'tool', name: string }",
       description: 'Constrain whether and which tool the model must call.',
     },
+    session: {
+      type: 'SessionStore',
+      description:
+        'Where conversations persist between runs. Pair with sessionId on the run. See Sessions.',
+    },
+    context: {
+      type: 'ContextPolicy',
+      description:
+        'How much prior conversation to carry in: { maxMessages, maxTokens, countTokens }.',
+    },
     metadata: {
       type: 'Record<string, string>',
       description:
@@ -126,7 +136,7 @@ const agent = new Agent({
 
 ```ts
 const result = await agent.run('What is the weather in Paris?', {
-  messages: previousResult.messages, // continue a conversation
+  sessionId: 'user_123', // continue a persisted conversation
   signal: controller.signal, // cancel the run
   timeoutMs: 30_000, // deadline for the whole run
   maxTurns: 4, // override the agent's ceiling for this run
@@ -134,6 +144,10 @@ const result = await agent.run('What is the weather in Paris?', {
   metadata: { userId: 'u_123' },
 })
 ```
+
+`sessionId` and `messages` are alternatives, not companions — use `messages` to
+manage the transcript yourself, `sessionId` to let the SDK do it. Passing both
+throws. See [Sessions](/docs/sessions).
 
 ### The result
 

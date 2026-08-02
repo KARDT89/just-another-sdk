@@ -1,85 +1,441 @@
 ---
 title: Memory & sessions
-description: Persisting conversations across runs, with pluggable storage.
+description: Conversations that outlive a run, with pluggable storage and context management.
 ---
 
-<Callout type="warn">
-  **Not shipped yet.** Multi-turn conversations work today by passing `messages`
-  back in — see below. This page describes the persistence layer that removes
-  that bookkeeping.
+Model APIs are stateless. Every SDK therefore makes you carry the transcript
+around yourself — load it, pass it in, take the new messages out, save them
+back — in every handler, forever.
+
+Sessions delete that code.
+
+```ts
+await agent.run('My name is Ada.', { sessionId: 'user_123' })
+await agent.run('What is my name?', { sessionId: 'user_123' })
+// → "Your name is Ada."
+```
+
+That is the whole feature. No store to import, no messages to thread through.
+History loads before the run and this run's new messages are appended after it.
+
+## Three levels
+
+### 1. Nothing at all
+
+A `sessionId` with no configured store uses a bounded in-memory store belonging
+to that agent. Good enough for a prototype, a test, or a single-process CLI —
+and gone when the process exits.
+
+<Callout>
+  The default store is **bounded**: 1000 sessions (LRU) and 200 messages each. An
+  unbounded map keyed by user id is a memory leak with a slow fuse, and it only
+  shows up in production. Adjust with `memorySession({ maxSessions,
+  maxMessagesPerSession })`.
 </Callout>
 
-## What works today
+### 2. One line, for persistence
 
-The model API is stateless, and so is this SDK. Continue a conversation by
-handing the previous messages to the next run:
+```ts
+import { Agent } from 'just-another-sdk'
+import { fileSession } from 'just-another-sdk/sessions/file'
+
+const agent = new Agent({
+  name: 'support',
+  model,
+  session: fileSession('./.sessions'), // ← the entire feature
+})
+```
+
+Nothing else changes. `sessionId` now survives a restart.
+
+### 3. A bound handle, for chat loops
+
+```ts
+const chat = agent.session('user_123')
+
+await chat.run('My name is Ada.')
+await chat.stream('And what is my name?')
+
+const transcript = await chat.messages({ limit: 20 })
+await chat.pop() // undo the last message
+await chat.clear()
+```
+
+`agent.session(id)` is sugar — `run` and `stream` are the agent's own with the id
+pre-filled. Servers usually want `agent.run(input, { sessionId })` instead, since
+the id arrives with the request. Both take the same path through the runtime.
+
+## Adapters
+
+| Adapter                   | Import from                        | For                             |
+| ------------------------- | ---------------------------------- | ------------------------------- |
+| `memorySession()`         | `just-another-sdk`                 | Tests, prototypes — the default |
+| `fileSession(dir)`        | `just-another-sdk/sessions/file`   | Local dev, CLI tools            |
+| `sqliteSession(path)`     | `just-another-sdk/sessions/sqlite` | Single-server deployments       |
+| `redisSession(client)`    | `just-another-sdk/sessions`        | Serverless, multi-instance      |
+| `postgresSession(client)` | `just-another-sdk/sessions`        | Postgres, Drizzle, or Prisma    |
+
+Every factory takes **one positional argument** for the common case, and an
+options object when you need more:
+
+```ts
+fileSession('./.sessions')
+sqliteSession({ path: './chat.db', table: 'conversations' })
+redisSession({ client: redis, prefix: 'chat:', ttlSeconds: 86_400 })
+postgresSession({ client: pool, schema: 'app', ensureTable: false })
+```
+
+<Callout>
+  `fileSession` and `sqliteSession` live at their own import paths because they
+  reach for `node:fs` and `node:sqlite`. Everything in
+  `just-another-sdk/sessions` is runtime-neutral, so an edge bundle never pulls
+  a Node builtin it cannot use.
+</Callout>
+
+### Your existing database, no new dependency
+
+`redisSession` and `postgresSession` take the client you already have and work
+out what it is:
+
+| You pass                      | Detected via                   |
+| ----------------------------- | ------------------------------ |
+| `pg` `Pool` / `Client`        | `.query(sql, params)`          |
+| `postgres.js` client          | `.unsafe(sql, params)`         |
+| `async (sql, params) => rows` | it already is the function     |
+| `node-redis`                  | `.rPush` / `.lRange` / `.rPop` |
+| `ioredis`                     | `.rpush` / `.lrange` / `.rpop` |
+
+```ts
+import { Pool } from 'pg'
+import { postgresSession } from 'just-another-sdk/sessions'
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const agent = new Agent({
+  name: 'support',
+  model,
+  session: postgresSession(pool),
+})
+```
+
+An ORM is one line, because both expose the escape hatch this needs:
+
+```ts
+// Drizzle — pass the driver underneath
+postgresSession(db.$client)
+
+// Prisma — wrap its raw query method
+postgresSession((sql, params) => prisma.$queryRawUnsafe(sql, ...params))
+```
+
+**None of those packages is a dependency of this SDK** — not even an optional
+peer. The client types are structural, so the zero-dependency guarantee holds
+whatever you connect.
+
+There is no `drizzleSession` or `prismaSession` export, on purpose. Drizzle's
+`db.execute()` takes no parameter array, so a real adapter would have to
+interpolate values into SQL — which this SDK will not do. Both one-liners above
+go through the same tested code path as `postgresSession(pool)`.
+
+### Schema
+
+The table and index are created on first use. Pass `ensureTable: false` when
+migrations own your schema:
+
+```sql
+create table if not exists agent_session_messages (
+  seq        bigserial   primary key,
+  session_id text        not null,
+  message    jsonb       not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists agent_session_messages_session_idx
+  on agent_session_messages (session_id, seq);
+```
+
+`sqliteSession` uses the same shape with `integer primary key autoincrement` and
+a `text` message column.
+
+### A custom adapter
+
+Three methods. Any database can back it:
+
+```ts
+import type { LoadOptions, ModelMessage, SessionStore } from 'just-another-sdk'
+
+class MongoSession implements SessionStore {
+  async load(
+    sessionId: string,
+    options?: LoadOptions,
+  ): Promise<ModelMessage[]> {
+    const docs = await messages
+      .find({ sessionId })
+      .sort({ seq: options?.limit ? -1 : 1 })
+      .limit(options?.limit ?? 0)
+      .toArray()
+    const ordered = options?.limit ? docs.reverse() : docs
+    return ordered.map((doc) => doc.message)
+  }
+
+  async append(
+    sessionId: string,
+    batch: readonly ModelMessage[],
+  ): Promise<void> {
+    await messages.insertMany(batch.map((message) => ({ sessionId, message })))
+  }
+
+  async clear(sessionId: string): Promise<void> {
+    await messages.deleteMany({ sessionId })
+  }
+
+  // Optional. Without it, `chat.pop()` throws a ConfigurationError naming
+  // this store.
+  async pop(sessionId: string): Promise<ModelMessage | undefined> {
+    const doc = await messages.findOneAndDelete(
+      { sessionId },
+      { sort: { seq: -1 } },
+    )
+    return doc?.message
+  }
+}
+```
+
+<Callout title="Why append, and not save(allMessages)">
+  Rewriting the whole transcript every turn is O(n²) writes over a conversation,
+  and it makes two concurrent runs on one session a lost update — both read the
+  same history, both write their own version, one wins.
+
+Appending has neither problem, and it is the native operation for every
+backend: a JSONL append, a SQL `INSERT`, a Redis `RPUSH`. There is no
+read-modify-write anywhere in the contract, so concurrent runs interleave their
+turns instead of destroying each other's.
+
+</Callout>
+
+## Reading a window
+
+`load` and `chat.messages()` take a `limit`, so a long conversation stops costing
+a full read every turn:
+
+```ts
+await chat.messages({ limit: 20 })
+```
+
+The runtime passes one automatically when `context.maxMessages` is set — it asks
+for one more than the budget, which is how a truncated read is told apart from a
+complete one and why `session.load` can report `truncated`.
+
+| Adapter    | How it windows                                     |
+| ---------- | -------------------------------------------------- |
+| `memory`   | `slice(-limit)`                                    |
+| `file`     | reads then slices — JSONL cannot be tailed cheaply |
+| `sqlite`   | `order by seq desc limit ?`, reversed              |
+| `redis`    | `LRANGE key -N -1`                                 |
+| `postgres` | `order by seq desc limit ?`, reversed              |
+
+**`limit` is a hint, not a guarantee.** A custom store that ignores it is slower,
+never wrong: the [context policy](#context-management) is applied to whatever
+comes back and remains the real bound.
+
+## Undo
+
+`pop()` removes and returns the last message. Two of them walk back an ordinary
+exchange, which is what "edit my message and regenerate" needs:
+
+```ts
+await chat.pop() // the assistant's reply
+await chat.pop() // the user's message
+await chat.run(edited) // ask again
+```
+
+A turn that called tools has more messages than two — the assistant's tool call
+and the tool results are messages too — so pop until you get the `user` one back:
+
+```ts
+let message
+do {
+  message = await chat.pop()
+} while (message && message.role !== 'user')
+```
+
+`pop` is optional on `SessionStore` so that implementing the interface is still
+three methods. Every shipped adapter provides it; a custom store that does not
+gets a `ConfigurationError` saying so.
+
+## Context management
+
+A conversation that only grows costs more every turn until the provider rejects
+it. `context` bounds what is sent:
+
+```ts
+const agent = new Agent({
+  name: 'support',
+  model,
+  session: fileSession('./.sessions'),
+  context: { maxTokens: 30_000 },
+})
+```
+
+| Option        | Effect                                                    |
+| ------------- | --------------------------------------------------------- |
+| `maxMessages` | Keep at most this many messages, counting from the newest |
+| `maxTokens`   | Keep at most this many tokens of history                  |
+| `countTokens` | Replace the built-in estimator                            |
+
+Set both and whichever bites first wins.
+
+**Trimming is not destructive.** The store keeps everything; only what the model
+sees is bounded. Raise the budget and the next run sees the full history again.
+
+Three rules hold, and each has a test:
+
+1. Only the oldest messages go.
+2. A `tool` message is never left without the assistant `tool-call` that produced
+   it — that is a protocol error at every provider.
+3. The newest message always survives, even alone and even over budget.
+
+`countTokens` exists because this SDK ships no tokenizer — a real one is a
+multi-megabyte dependency. The default is a `characters / 4` estimate: close
+enough to keep a conversation inside a window, wrong enough that you should pass
+your provider's real counter when precision matters.
+
+```ts
+context: { maxTokens: 30_000, countTokens: (message) => myTokenizer.count(message) }
+```
+
+<Callout type="warn">
+  Trimming happens **when history is loaded**, not during a run. Growth within
+  one run is already bounded by `maxTurns`; growth across runs is what is
+  unbounded. A single run with many large tool results can still exceed the
+  window.
+</Callout>
+
+Trimming also applies to `options.messages`, so `context` is useful without a
+session store at all.
+
+### Summarizing instead of dropping
+
+Trimming loses the beginning of a conversation. `summarize` replaces it with a
+model-written recap instead:
+
+```ts
+const agent = new Agent({
+  name: 'support',
+  model,
+  session: fileSession('./.sessions'),
+  context: { maxTokens: 30_000, summarize: true },
+})
+```
+
+`true` uses the agent's own model. An object overrides any of it:
+
+| Option            | Default         | Effect                               |
+| ----------------- | --------------- | ------------------------------------ |
+| `model`           | the agent's     | Summarize with something cheaper     |
+| `prompt`          | built-in        | Replace the instruction              |
+| `keepRecent`      | half the budget | How much stays verbatim after a fold |
+| `maxOutputTokens` | 512             | Ceiling on the recap itself          |
+| `timeoutMs`       | 30_000          | Deadline for the summarizing call    |
+
+```ts
+context: { maxTokens: 30_000, summarize: { model: openrouter('openai/gpt-4o-mini') } }
+```
+
+**A failed summary never fails the run.** If the call errors or times out, the
+run falls back to plain trimming and the `session.summarize` event carries the
+error. A recap is an optimisation on cost and continuity; losing it must not
+lose the answer.
+
+**Nothing is deleted.** The summary is appended as a message; the originals stay
+in the store and `chat.messages()` still returns them. A fold _writes_ one
+message rather than removing many.
+
+Three details worth knowing:
+
+- **A fold compacts to half the budget**, not to the budget. Folding to the limit
+  leaves no headroom, so the next turn is over it again and buys another summary
+  — one extra model call per turn, forever. `keepRecent` sets this explicitly.
+- **The summary sits above the budget**, since it stands in for what was removed.
+  With `maxTokens` it adds at most `maxOutputTokens`; with `maxMessages`, one.
+- **Summarizing reads the whole log.** A summary records how many messages from
+  the start it replaces, and a windowed read cannot know that number — it would
+  produce a summary claiming to cover 1 message when it covers 40, and the next
+  run would replay everything in between. `maxMessages` without `summarize` still
+  bounds the read.
+
+Two honest edge cases: a user who literally types the summary header has one
+message misread as a summary, and two concurrent runs may each append one — both
+are valid, and the one covering more history wins on the next load.
+
+## What gets saved, and when
+
+Only a **completed** run is persisted, and only the messages it produced.
+
+A run that throws mid-turn can leave an assistant message holding tool calls
+whose results never arrived. Every provider rejects that on the next request, so
+saving it would poison the session rather than preserve it. A `max_turns` stop
+_is_ a completion — the conversation is valid, just unfinished — and does save.
+
+## Observing it
+
+Two events fire when a session is in use:
+
+| Event          | Carries                                                   |
+| -------------- | --------------------------------------------------------- |
+| `session.load` | `sessionId`, `messageCount`, `droppedCount`, `durationMs` |
+| `session.save` | `sessionId`, `appendedCount`, `durationMs`                |
+
+`droppedCount` is why `session.load` exists. Trimming is the one thing the
+session layer does that silently changes what the model sees, and "why did it
+forget?" is unanswerable without it. The built-in tracer prints both:
+
+```text
+▶ run_msbgluq5  memory-demo · openai/gpt-4o-mini
+  ∑ summarised 30 · 30 covered · kept 12 · 840ms
+  ↺ session demo-user · 13 messages · trimmed 30
+  ↥ session demo-user · +2 saved
+✔ finish · 1 turn · 812 in / 47 out · 1.2s
+```
+
+## `sessionId` or `messages`, not both
+
+```ts
+await agent.run('hi', { sessionId: 's', messages: previous }) // throws
+```
+
+A session already holds the conversation; passing `messages` too would send two
+overlapping copies of it. Rather than silently concatenating them into a bug you
+would find much later, this is a `ConfigurationError`.
+
+Managing history yourself still works exactly as before — just use `messages`
+alone:
 
 ```ts
 const first = await agent.run('My name is Ada.')
 const second = await agent.run('What is my name?', { messages: first.messages })
 ```
 
-`result.messages` is the complete transcript, including the system message, so it
-round-trips exactly. Persist it wherever you already keep state:
+## Coming from OpenAI's Agents SDK
 
-```ts
-await db.conversations.update(id, { messages: result.messages })
-```
+The concepts line up one for one; only the names differ.
 
-That is enough for a chat product. What it does not give you is context-window
-management, or a place for the agent to remember things across conversations.
+| OpenAI                  | Here                                        |
+| ----------------------- | ------------------------------------------- |
+| `getItems(limit)`       | `load(id, { limit })`                       |
+| `addItems(items)`       | `append(id, messages)`                      |
+| `popItem()`             | `pop(id)`                                   |
+| `clearSession()`        | `clear(id)`                                 |
+| `getSessionId()`        | `chat.sessionId`                            |
+| `new SQLiteSession(id)` | `agent.session(id)`                         |
+| `session=` on a run     | `session` on the agent, `sessionId` per run |
 
-## Intended API
+The store is configured once on the agent rather than constructed per
+conversation, which is what makes a server route one line — the id arrives with
+the request, and nothing else has to.
 
-```ts
-import { Agent } from 'just-another-sdk'
-import { sqliteSession } from 'just-another-sdk/sessions/sqlite'
+## Three kinds of state
 
-const agent = new Agent({
-  name: 'support',
-  model,
-  session: sqliteSession({ path: './sessions.db' }),
-})
-
-// The conversation is loaded and saved automatically
-await agent.run('My name is Ada.', { sessionId: 'user_123' })
-await agent.run('What is my name?', { sessionId: 'user_123' })
-```
-
-### Planned adapters
-
-| Adapter                    | Use                                    |
-| -------------------------- | -------------------------------------- |
-| `memorySession()`          | Tests and single-process apps          |
-| `fileSession({ dir })`     | Local development, CLI tools           |
-| `sqliteSession({ path })`  | Single-server deployments              |
-| `redisSession({ client })` | Serverless and multi-instance          |
-| Custom                     | Implement the `SessionStore` interface |
-
-### The storage interface
-
-Deliberately small, so any database can back it:
-
-```ts
-interface SessionStore {
-  load(sessionId: string): Promise<ModelMessage[] | undefined>
-  save(sessionId: string, messages: ModelMessage[]): Promise<void>
-  delete(sessionId: string): Promise<void>
-}
-```
-
-## Context management
-
-Long conversations eventually exceed the context window. The planned strategies,
-configured per agent:
-
-- **`trim`** — drop the oldest turns, keeping the system message and recent history.
-- **`summarize`** — replace old turns with a model-generated summary.
-- **`none`** — let the provider error, and handle it yourself.
-
-## Why it is separate
-
-The three kinds of state are kept apart on purpose:
+Kept apart on purpose, which is what lets one `Agent` serve every concurrent
+request in a server:
 
 |            | Holds                  | Lifetime    |
 | ---------- | ---------------------- | ----------- |
@@ -87,6 +443,24 @@ The three kinds of state are kept apart on purpose:
 | `RunState` | messages, turns, usage | One run     |
 | `Session`  | persisted conversation | Across runs |
 
-Sessions plug in at the run boundary — loading messages before the loop starts
-and saving them after it ends — so nothing in the agent runtime needs to change
-to support them.
+Sessions plug in at the run boundary — loading before the loop starts, appending
+after it ends — so nothing in the agent runtime changes to support them, and
+`agent.stream()` gets them for free.
+
+## Full example
+
+[`examples/04-sessions`](https://github.com/KARDT89/just-another-sdk/tree/main/examples/04-sessions)
+holds a conversation across two separate process invocations:
+
+```bash
+pnpm example:sessions   # introduces itself
+pnpm example:sessions   # a new process — and it still remembers
+```
+
+[`examples/05-chat-server`](https://github.com/KARDT89/just-another-sdk/tree/main/examples/05-chat-server)
+is a whole chat backend: a session per user, streaming, tool events, and undo.
+
+```bash
+pnpm example:server
+curl -N "http://localhost:8787/chat?user=ada" -d "My name is Ada."
+```

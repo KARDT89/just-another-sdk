@@ -2,8 +2,21 @@ import { ConfigurationError } from '../errors/errors.js'
 import type { RunResult } from '../run/result.js'
 import { runAgent } from '../run/runner.js'
 import { streamAgent, type StreamedRun } from '../run/stream.js'
+
+import { defaultSessionStore } from '../sessions/memory.js'
+import type { LoadOptions, SessionStore } from '../sessions/store.js'
+import { defaultStreamStore } from '../streams/memory.js'
+import {
+  resumeStream,
+  startResumable,
+  type FollowOptions,
+  type ResumableOptions,
+  type ResumableRun,
+} from '../streams/resumable.js'
+import type { StreamStore } from '../streams/store.js'
 import { ToolRegistry } from '../tools/registry.js'
 import type { AnyTool } from '../tools/tool.js'
+import type { ModelMessage } from '../types/messages.js'
 import type { AgentConfig, AgentInput, RunOptions } from './types.js'
 
 /**
@@ -130,6 +143,104 @@ export class Agent {
   }
 
   /**
+   * This agent, bound to one conversation.
+   *
+   * Everything below is the same run with `sessionId` pre-filled — the point is
+   * that a chat loop stops carrying history around:
+   *
+   * ```ts
+   * const chat = agent.session('user_123')
+   *
+   * await chat.run('My name is Ada.')
+   * await chat.run('What is my name?')   // "Ada"
+   *
+   * await chat.messages({ limit: 20 })   // the recent transcript
+   * await chat.pop()                     // undo the last message
+   * await chat.clear()                   // forget it
+   * ```
+   *
+   * Servers usually want `agent.run(input, { sessionId })` instead, since the id
+   * arrives with the request. Both take the same path through the runtime.
+   */
+  session(sessionId: string): AgentSession {
+    const store = this.config.session ?? defaultSessionStore(this.config)
+
+    return {
+      sessionId,
+      store,
+
+      run: <TOutput = string>(input: AgentInput, options: RunOptions = {}) =>
+        this.run<TOutput>(input, { ...options, sessionId }),
+
+      stream: <TOutput = string>(input: AgentInput, options: RunOptions = {}) =>
+        this.stream<TOutput>(input, { ...options, sessionId }),
+
+      messages: (options?: LoadOptions) => store.load(sessionId, options),
+
+      clear: () => store.clear(sessionId),
+
+      pop: () => {
+        if (!store.pop) {
+          throw new ConfigurationError('This session store does not support pop().', {
+            hint:
+              'Add a `pop(sessionId)` method to your SessionStore that removes and returns ' +
+              'the last message. Every adapter shipped with the SDK implements it.',
+          })
+        }
+        return store.pop(sessionId)
+      },
+    }
+  }
+
+  /**
+   * A run that survives the client disconnecting.
+   *
+   * ```ts
+   * // start
+   * const run = agent.resumable(message, { sessionId: userId })
+   * return run.toEventResponse()          // carries x-stream-id
+   *
+   * // reconnect, from a different request and possibly a different instance
+   * const from = Number(req.headers.get('last-event-id') ?? 0) + 1
+   * return agent.resume(streamId, { fromIndex: from }).toEventResponse()
+   * ```
+   *
+   * Every event is recorded as it happens, so a reader can join late, re-join
+   * after a dropped connection, or read the whole thing once the run is over.
+   *
+   * Deliberately **not** wired to a request signal: cancelling on disconnect is
+   * the behaviour this exists to avoid. It also removes a real failure mode —
+   * an ordinary streamed run cancelled by a disconnect saves nothing, so the
+   * user loses the exchange they had already watched arrive.
+   *
+   * Uses {@link AgentConfig.streams}, or a bounded in-memory store when the
+   * agent has none. In-memory is correct for one process and silently wrong
+   * behind a load balancer; use `redisStreamStore` there.
+   */
+  resumable<TOutput = string>(
+    input: AgentInput,
+    options: ResumableOptions = {},
+  ): ResumableRun<TOutput> {
+    return startResumable<TOutput>(this.config, this.streamStore(), input, options)
+  }
+
+  /**
+   * Re-attaches to a run started by {@link resumable}: replays what has already
+   * happened, then follows the rest.
+   *
+   * A finished run resumes just as well as one still going — the recording is
+   * the source of truth, not the process that produced it.
+   */
+  resume(streamId: string, options: FollowOptions = {}): ReturnType<typeof resumeStream> {
+    return resumeStream(this.streamStore(), streamId, options)
+  }
+
+  /** Configured stream store, or this agent's own in-memory one. */
+  private streamStore(): StreamStore {
+    return this.config.streams ?? defaultStreamStore(this.config)
+  }
+
+  /**
    * A copy of this agent with some configuration replaced.
    *
    * The original is untouched, so this is the safe way to specialise a shared
@@ -153,6 +264,49 @@ export class Agent {
   toConfig(): Readonly<AgentConfig> {
     return { ...this.config }
   }
+}
+
+/**
+ * An agent bound to one conversation, returned by {@link Agent.session}.
+ *
+ * Sugar, not a second code path: `run` and `stream` are the agent's own with a
+ * `sessionId` attached.
+ */
+export interface AgentSession {
+  readonly sessionId: string
+
+  /** The store backing this conversation, for direct access when you need it. */
+  readonly store: SessionStore
+
+  run<TOutput = string>(input: AgentInput, options?: RunOptions): Promise<RunResult<TOutput>>
+
+  stream<TOutput = string>(input: AgentInput, options?: RunOptions): StreamedRun<TOutput>
+
+  /**
+   * The stored transcript, oldest first. Untrimmed — this is what was saved, not
+   * what the model last saw. `{ limit }` returns only the newest N.
+   */
+  messages(options?: LoadOptions): Promise<ModelMessage[]>
+
+  /** Forget the conversation. */
+  clear(): Promise<void>
+
+  /**
+   * Removes and returns the last message — "undo".
+   *
+   * Two pops walk back a whole exchange, which is what "edit my message and
+   * regenerate" needs:
+   *
+   * ```ts
+   * await chat.pop()          // the assistant's reply
+   * await chat.pop()          // the user's message
+   * await chat.run(edited)    // ask again
+   * ```
+   *
+   * Throws a `ConfigurationError` on a custom store that does not implement
+   * `pop`.
+   */
+  pop(): Promise<ModelMessage | undefined>
 }
 
 /**

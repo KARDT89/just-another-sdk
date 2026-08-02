@@ -31,8 +31,24 @@
 /* ── Agents ──────────────────────────────────────────────────────────────── */
 
 export { Agent, run } from './agent/agent.js'
+export type { AgentSession } from './agent/agent.js'
 export { AGENT_DEFAULTS } from './agent/types.js'
 export type { AgentConfig, AgentInput, RunOptions, ToolErrorPolicy } from './agent/types.js'
+
+/* ── Sessions ────────────────────────────────────────────────────────────── */
+
+/**
+ * The contract and the default store live at the root so that persisting a
+ * conversation, or writing an adapter for your own database, needs no extra
+ * import. The backed adapters are in `just-another-sdk/sessions`.
+ */
+export { memorySession } from './sessions/memory.js'
+export type { MemorySessionOptions } from './sessions/memory.js'
+export type { LoadOptions, SessionStore } from './sessions/store.js'
+export { estimateTokens, trimHistory } from './sessions/trim.js'
+export type { ContextPolicy } from './sessions/trim.js'
+export { isSummaryMessage } from './sessions/summarize.js'
+export type { SummarizeOptions } from './sessions/summarize.js'
 
 /* ── Tools ───────────────────────────────────────────────────────────────── */
 
@@ -58,6 +74,27 @@ export { runAgent } from './run/runner.js'
 export { streamAgent } from './run/stream.js'
 export type { StreamedRun } from './run/stream.js'
 
+/* ── Streaming over HTTP ─────────────────────────────────────────────────── */
+
+/**
+ * The two halves of streaming a run to a browser. Both are runtime-neutral —
+ * `readEventStream` is the client side and runs anywhere `fetch` does.
+ */
+export { readEventStream } from './http/read-stream.js'
+export type { ReadEventStreamOptions } from './http/read-stream.js'
+export type { EventStreamOptions } from './http/to-stream.js'
+
+/* ── Resumable streams ───────────────────────────────────────────────────── */
+
+/**
+ * The contract and the default store live at the root; the Redis adapter is in
+ * `just-another-sdk/streams`.
+ */
+export { memoryStreamStore } from './streams/memory.js'
+export type { MemoryStreamStoreOptions } from './streams/memory.js'
+export type { FollowOptions, ResumableOptions, ResumableRun } from './streams/resumable.js'
+export type { StreamOutcome, StreamStatus, StreamStore } from './streams/store.js'
+
 /* ── Reliability ─────────────────────────────────────────────────────────── */
 
 export type { RetryPolicy } from './run/retry.js'
@@ -78,6 +115,9 @@ export type {
   RunErrorEvent,
   RunFinishEvent,
   RunStartEvent,
+  SessionLoadEvent,
+  SessionSaveEvent,
+  SessionSummarizeEvent,
   TextDeltaEvent,
   ToolEndEvent,
   ToolStartEvent,
