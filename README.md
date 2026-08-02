@@ -9,13 +9,14 @@ npm i just-another-sdk
 
 ```ts
 import { Agent } from 'just-another-sdk'
-import { openrouter } from 'just-another-sdk/providers'
+import { anthropic, google } from 'just-another-sdk/providers'
 import { webTools } from 'just-another-sdk/tools'
 
 const agent = new Agent({
   name: 'assistant',
   instructions: 'Use your tools rather than guessing.',
-  model: openrouter('anthropic/claude-opus-5'),
+  model: anthropic('claude-opus-5'),
+  fallbacks: [google('gemini-2.5-pro')], // an outage becomes a line in the trace
   tools: [...webTools()], // weather, wikipedia, geocoding, currency — no API key
 })
 
@@ -36,24 +37,26 @@ time turn out to be the unglamorous ones — a model that loops until your bill
 spikes, a tool exception that takes down a request, an API key in a CI log, a
 dependency tree you cannot audit, and no way to see what your agent did.
 
-- **Zero runtime dependencies.** Providers are plain `fetch` calls. Runs on Node,
-  Bun, Deno, and edge runtimes unchanged.
+- **Zero runtime dependencies.** Every provider is a plain `fetch` call — Claude,
+  Gemini, and OpenAI natively, no vendor SDK. Runs on Node, Bun, Deno, and edge
+  runtimes unchanged.
 - **A loop that cannot hang.** Every exit path sets a `stopReason` — and that
   budget is shared across a whole chain of agents, not handed out per agent.
 - **Failures stay recoverable.** A tool that throws becomes a tool result the
   model reads and works around.
-- **Seventeen tools in the box.** Five automatic, four that need no API key, and
-  the rest locked down by default.
+- **Batteries, not a shopping list.** Maths, time, and reasoning tools on every
+  agent with no import; web tools that need no API key; the rest locked down by
+  default.
 - **Dangerous things refused.** Filesystem tools cannot leave their root, not
   even through a symlink; HTTP refuses cloud-metadata and private addresses even
   when you allow every host.
 - **Your validator, not ours.** Any [Standard Schema](https://standardschema.dev)
   validator — Zod, Valibot, ArkType.
 - **Secrets never reach your logs.** Asserted by a dedicated test suite.
-- **Observable by construction.** One stream of 19 typed events feeds tracing,
-  metrics, and progress UIs.
+- **Observable by construction.** One typed event stream feeds tracing, metrics,
+  and progress UIs.
 
-Full documentation: **[the docs site](https://just-another-sdk.vercel.app)** ·
+Full documentation: **[the docs site](https://sdk.tamalsarkar.dev)** ·
 package README: [`packages/core`](./packages/core/README.md)
 
 ## What it does
@@ -62,21 +65,22 @@ package README: [`packages/core`](./packages/core/README.md)
 | --------------------- | ----------------------------------------------------------------------- |
 | **Agent runtime**     | Multi-turn loop, parallel tool calls, bounded by `maxTurns`             |
 | **Tools**             | Typed handlers, schema validation, timeouts, recoverable failures       |
-| **Built-in tools**    | 17, tiered by blast radius — see [`tools`](./packages/core/src/tools)   |
+| **Built-in tools**    | Tiered by blast radius — see [`tools`](./packages/core/src/tools)       |
 | **Handoffs**          | Delegate to a specialist; one run, cycle detection, route in the result |
 | **Guardrails**        | Input, output, and per-tool checks, plus human approval gates           |
 | **Sessions**          | Memory, file, SQLite, Redis, Postgres, or your own adapter              |
 | **Structured output** | `outputSchema` with typed inference and automatic repair                |
 | **Streaming**         | Async-iterable runs, SSE over HTTP, and resumable streams               |
 | **Reliability**       | Retries with jitter, model fallback chains, timeouts, cancellation      |
-| **Tracing**           | 19 typed events, a console tracer, per-turn `steps[]`                   |
+| **Providers**         | Native Anthropic, Gemini, and OpenAI; OpenRouter; anything compatible   |
+| **Tracing**           | One typed event stream, a console tracer, per-turn `steps[]`            |
 
 ## Repository layout
 
 ```
 packages/core/     the SDK, published as `just-another-sdk`
 apps/web/          landing page + documentation (Next.js, Fumadocs, shadcn/ui)
-examples/          ten runnable example projects
+examples/          runnable example projects
 docs/DELTA.md      what is built, what is not, and what happens next
 ```
 
@@ -96,7 +100,7 @@ pnpm check            # format:check + lint + typecheck + test + build
 | Command           | Does                                  |
 | ----------------- | ------------------------------------- |
 | `pnpm build`      | Build every package                   |
-| `pnpm test`       | Run the test suite (offline, ~2.5s)   |
+| `pnpm test`       | Run the test suite (fully offline)    |
 | `pnpm test:watch` | Watch mode                            |
 | `pnpm typecheck`  | Typecheck every workspace             |
 | `pnpm lint`       | Lint every workspace                  |
@@ -106,7 +110,7 @@ pnpm check            # format:check + lint + typecheck + test + build
 
 ### Running the examples
 
-Three of them need no API key at all.
+Several of them need no API key at all.
 
 ```bash
 echo "OPENROUTER_API_KEY=sk-or-v1-..." > examples/.env
@@ -121,6 +125,7 @@ pnpm example:structured     # typed output, and repairing an invalid answer
 pnpm example:guardrails     # three places to refuse, one to ask a person — no key
 pnpm example:handoffs       # routing to specialists, loop prevention — no key
 pnpm example:builtin-tools  # the built-in tool pack — no key
+pnpm example:providers      # native Claude + Gemini, and failing over — no key
 ```
 
 ### Testing
@@ -129,7 +134,7 @@ The suite is fully offline — it uses the `mockProvider` that ships in
 `just-another-sdk/testing`, so it needs no API key and is deterministic.
 
 ```bash
-pnpm test                                     # 567 offline, ~2.5s
+pnpm test                                     # fully offline
 pnpm --filter just-another-sdk test:coverage
 ```
 
@@ -149,8 +154,8 @@ API key cannot reach an error, an event, or a trace.
 
 ## Roadmap
 
-Native Anthropic and Gemini providers · trace exporters for JSON and
-OpenTelemetry · a sandboxed `run_command`.
+Trace exporters for JSON and OpenTelemetry · a sandboxed `run_command` ·
+native Bedrock and Vertex transports.
 
 ## License
 

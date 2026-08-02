@@ -1,12 +1,177 @@
 ---
 title: Providers
-description: OpenRouter, OpenAI, local models, and writing your own.
+description: Anthropic, Gemini, OpenAI, OpenRouter, local models, and writing your own.
 ---
 
 A provider binds the SDK to a model. Every provider that ships with the package
 is a plain `fetch` wrapper — no vendor SDK, no dependency, which is why the
 package installs with an empty dependency tree and runs unchanged on Node, Bun,
 Deno, and edge runtimes.
+
+Three vendors have **native** transports, speaking their own API directly rather
+than through a translation layer:
+
+```ts
+import { anthropic, google, openai } from 'just-another-sdk/providers'
+
+anthropic('claude-opus-5') // the Messages API
+google('gemini-2.5-pro') // generateContent
+openai('gpt-5') // Chat Completions
+```
+
+Everything else rides the OpenAI-compatible transport — OpenRouter for hundreds
+of models behind one key, or `compatible()` for any endpoint that speaks the
+OpenAI shape.
+
+## Anthropic
+
+Claude, natively, over the Messages API.
+
+```ts
+import { anthropic } from 'just-another-sdk/providers'
+
+anthropic('claude-opus-5')
+anthropic('claude-sonnet-5')
+```
+
+Reads `ANTHROPIC_API_KEY` from the environment by default.
+
+<TypeTable
+  type={{
+    apiKey: {
+      type: 'string',
+      description: 'Defaults to process.env.ANTHROPIC_API_KEY.',
+    },
+    baseUrl: { type: 'string', default: 'https://api.anthropic.com/v1' },
+    version: {
+      type: 'string',
+      default: '2023-06-01',
+      description: 'Sent as the anthropic-version header.',
+    },
+    maxOutputTokens: {
+      type: 'number',
+      default: '4096',
+      description:
+        'Anthropic requires max_tokens. Used when the agent does not set maxOutputTokens.',
+    },
+    structuredOutputs: {
+      type: 'boolean',
+      default: 'false',
+      description:
+        'Translate outputSchema into the native output_config.format. Off by default because the field is model-gated.',
+    },
+    betas: {
+      type: 'string[]',
+      description: 'Comma-joined into the anthropic-beta header.',
+    },
+    defaultBody: {
+      type: 'Record<string, unknown>',
+      description: 'Merged into every request body. The escape hatch.',
+    },
+    headers: {
+      type: 'Record<string, string>',
+      description: 'Extra headers merged into every request.',
+    },
+    fetch: { type: 'typeof fetch', description: 'Injected for tests.' },
+  }}
+/>
+
+Three things worth knowing.
+
+**`max_tokens` is required by the API but optional on the agent**, so the
+provider supplies 4096 when you do not. Set `maxOutputTokens` on the agent, or
+`maxOutputTokens` on the provider, if your answers are longer than that.
+
+**Recent Claude models reject `temperature` with a 400** — Opus 5, Opus 4.8,
+Opus 4.7, and Fable 5 among them. The provider passes it through when you set it,
+because second-guessing the request is not a provider's job, so remove it with
+the escape hatch if a model refuses it:
+
+```ts
+anthropic('claude-opus-5', { defaultBody: { temperature: undefined } })
+```
+
+**Structured output is opt-in.** `output_config.format` is native but model-gated,
+so an older Claude rejects it. Left off, `outputSchema` still works — the runtime
+instructs, validates, and repairs, exactly as it does for any provider without
+native support. Turn it on when you know the model accepts it:
+
+```ts
+anthropic('claude-opus-5', { structuredOutputs: true })
+```
+
+`defaultBody` reaches anything else the API takes:
+
+```ts
+anthropic('claude-opus-5', {
+  defaultBody: {
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'high' },
+  },
+})
+```
+
+## Gemini
+
+Gemini, natively, over `generateContent`. Exported as both `google` and `gemini`.
+
+```ts
+import { google } from 'just-another-sdk/providers'
+
+google('gemini-2.5-pro')
+google('gemini-2.5-flash')
+google('tunedModels/my-tuned-model') // a bare id is prefixed with `models/`; this is not
+```
+
+Reads `GEMINI_API_KEY`, then `GOOGLE_API_KEY`.
+
+<TypeTable
+  type={{
+    apiKey: {
+      type: 'string',
+      description: 'Defaults to GEMINI_API_KEY, then GOOGLE_API_KEY.',
+    },
+    baseUrl: {
+      type: 'string',
+      default: 'https://generativelanguage.googleapis.com/v1beta',
+    },
+    defaultBody: {
+      type: 'Record<string, unknown>',
+      description:
+        'Merged into every request body. generationConfig is shallow-merged rather than replaced.',
+    },
+    headers: {
+      type: 'Record<string, string>',
+      description: 'Extra headers merged into every request.',
+    },
+    fetch: { type: 'typeof fetch', description: 'Injected for tests.' },
+  }}
+/>
+
+The key is sent as the `x-goog-api-key` header, never as a `?key=` query
+parameter — a credential in a URL ends up in error messages, proxy access logs,
+and referrers.
+
+**Tool schemas are rewritten before they are sent.** Gemini accepts only an
+OpenAPI 3.0 subset of JSON Schema: no `$schema`, no `additionalProperties`, no
+`$defs`, no `const`, no `oneOf`. Zod emits the first of those and the SDK's own
+empty-object schema emits the second, so without a translation pass every tool
+would be rejected. The pass inlines `$ref`s, rewrites `const` to a single-member
+`enum`, merges `allOf`, renames `oneOf` to `anyOf`, and drops the rest. It never
+throws — anything unrepresentable degrades to a looser schema.
+
+**Structured output is skipped when the agent has tools.** Gemini does not
+reliably support `responseSchema` alongside `functionDeclarations`; depending on
+the model it either fails the request or quietly stops calling functions. With
+tools present, `outputSchema` falls back to the runtime's instruct-and-repair
+path. Without tools, it maps to `responseMimeType` and a sanitized
+`responseSchema`.
+
+A 429 carries Google's `RetryInfo`, and the provider reads it. When the delay it
+asks for exceeds `maxRetryDelayMs`, the retry policy stops retrying and moves to
+the next provider in your `fallbacks` chain — which is the right outcome, and
+better than burning the whole retry budget on short back-offs that immediately
+rate-limit again.
 
 ## OpenRouter
 
@@ -243,10 +408,33 @@ throw new ProviderError(`… returned ${response.status}`, {
 })
 ```
 
-## Coming next
+## Falling over
 
-Native Anthropic (Messages API) and Gemini (`generateContent`) providers. Both
-vendors are already reachable today through OpenRouter.
+A provider list is only as useful as what happens when one of them is down. Pass
+`fallbacks` and the run continues on the next provider — same run id, same usage
+total, same transcript:
+
+```ts
+new Agent({
+  name: 'assistant',
+  model: anthropic('claude-opus-5'),
+  fallbacks: [google('gemini-2.5-pro'), openai('gpt-5')],
+})
+```
+
+```text
+▶ run_msbtg147_qsa69f  assistant · claude-opus-5
+  ⟳ retry 1/2 · provider_error · waiting 181ms
+  ⇄ fallback → gemini-2.5-pro · after provider_error
+  ↳ get_weather {"city":"Paris"}
+    → {"city":"Paris","tempC":18,"summary":"clear"} 1ms
+✔ finish · 2 turns · 20 in / 10 out · 296ms
+```
+
+Only retryable failures fall over: a rate limit, a timeout, a network error, a
+5xx — Anthropic's 529 overload and Gemini's `RESOURCE_EXHAUSTED` included. A bad
+API key or a malformed request fails immediately, because trying the same broken
+request against another vendor only wastes time.
 
 ## Next
 

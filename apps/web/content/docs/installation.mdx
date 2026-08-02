@@ -58,9 +58,13 @@ tool — see [Tools](/docs/tools#other-validators).
 
 ## Get a model key
 
-The fastest option is [OpenRouter](https://openrouter.ai) — one key reaches
-hundreds of models across every major vendor, which makes swapping models a
-one-string change.
+Claude, Gemini, and OpenAI have native providers, so if you already have one of
+those keys you are ready — set `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or
+`OPENAI_API_KEY` and skip to the next page.
+
+Otherwise the fastest option is [OpenRouter](https://openrouter.ai) — one key
+reaches hundreds of models across every major vendor, which makes swapping
+models a one-string change.
 
 <Steps>
 <Step>
@@ -100,8 +104,9 @@ node --env-file=.env agent.ts
 </Step>
 </Steps>
 
-Prefer a different vendor? [Providers](/docs/providers) covers OpenAI, Groq,
-Together, DeepSeek, local Ollama and vLLM, and how to write your own.
+Prefer a different vendor? [Providers](/docs/providers) covers the native
+Anthropic, Gemini, and OpenAI transports, Groq, Together, DeepSeek, local Ollama
+and vLLM, and how to write your own.
 
 <Callout type="warn">
   Never commit a key. Add `.env` to `.gitignore`. The SDK will not leak a key
@@ -157,6 +162,6 @@ and later) so the package's subpath exports resolve.
   <Card
     href="/docs/providers"
     title="Providers"
-    description="Use OpenAI, Groq, or a local model."
+    description="Claude, Gemini, OpenAI, or a local model."
   />
 </Cards>

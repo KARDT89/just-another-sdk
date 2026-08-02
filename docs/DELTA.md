@@ -342,10 +342,10 @@ hosting the docs (category 10) and the video (12).
 No more runtime work. The two categories still open are the two nobody else can
 do for you.
 
-- [ ] **Host the docs.** [`vercel.json`](../apps/web/vercel.json) already has the
-      monorepo build command; point Vercel at `apps/web`. Then put the real URL
-      in [`README.md`](../README.md) and `packages/core/package.json` `homepage`,
-      both of which currently guess at `just-another-sdk.vercel.app`.
+- [x] **Host the docs.** Live at `https://sdk.tamalsarkar.dev`. The URL is in
+      [`README.md`](../README.md) and in the site's `metadataBase`.
+      `packages/core/package.json` `homepage` still points at the GitHub readme —
+      changing it means a release, so it can ride the next one.
 - [ ] **Write the pitch.** Who it is for, what it solves, why it should exist,
       how it differs, why anyone would adopt it. The material is all in this
       repository already — the zero-dependency claim, the loop that cannot hang,
@@ -363,16 +363,20 @@ someone could read in two minutes · a video where the product is visibly workin
 
 1. **Does `run_command` ship before launch?** It is the one obvious gap in the
    tool pack, and it is also the one tool where a mistake is unrecoverable.
-2. **Is the hosted docs URL a custom domain or `*.vercel.app`?** It goes in a
-   published `package.json`, so changing it later means a release.
+2. ~~**Is the hosted docs URL a custom domain or `*.vercel.app`?**~~ Answered:
+   `sdk.tamalsarkar.dev`. Still worth folding into `package.json` `homepage` on
+   the next release rather than cutting one for it.
 
 ---
 
 ## Later steps
 
 Nothing scheduled after launch. Candidates, in rough order of value: trace
-exporters for JSON and OpenTelemetry (closes the last `partial`), native
-Anthropic and Gemini providers, and a sandboxed `run_command`.
+exporters for JSON and OpenTelemetry (closes the last `partial`), a sandboxed
+`run_command`, and native Bedrock and Vertex transports.
+
+Native Anthropic and Gemini providers shipped — see the changeset in
+`.changeset/native-anthropic-and-gemini.md`.
 
 ---
 

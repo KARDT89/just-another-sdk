@@ -3,7 +3,7 @@ import { Geist, Geist_Mono } from 'next/font/google'
 import type { Metadata, Viewport } from 'next'
 import './global.css'
 import { cn } from '@/lib/utils'
-import { appName, description, links, tagline } from '@/lib/shared'
+import { appName, description, links, siteUrl, tagline } from '@/lib/shared'
 
 /**
  * Geist Mono is loaded as a first-class family, not just for code blocks: the
@@ -19,8 +19,20 @@ export const metadata: Metadata = {
     template: `%s — ${appName}`,
   },
   description,
-  keywords: ['ai agent', 'llm', 'typescript', 'sdk', 'tool calling', 'openrouter', 'agents'],
-  metadataBase: new URL('https://just-another-sdk.vercel.app'),
+  keywords: [
+    'ai agent',
+    'llm',
+    'typescript',
+    'sdk',
+    'tool calling',
+    'agents',
+    'anthropic',
+    'claude',
+    'gemini',
+    'openai',
+    'openrouter',
+  ],
+  metadataBase: new URL(siteUrl),
   openGraph: {
     title: `${appName} — ${tagline}`,
     description,

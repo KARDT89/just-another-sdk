@@ -235,13 +235,19 @@ Re-exported from the root so writing a provider needs only one import:
 
 ## `just-another-sdk/providers`
 
-| Export                                                                              | Description                              |
-| ----------------------------------------------------------------------------------- | ---------------------------------------- |
-| `openrouter(modelId, options?)`                                                     | [OpenRouter](/docs/providers#openrouter) |
-| `openai(modelId, options?)`                                                         | OpenAI Chat Completions                  |
-| `compatible(modelId, options)`                                                      | Any OpenAI-compatible endpoint           |
-| `createOpenAICompatibleProvider(config)`                                            | The shared transport, for building on    |
-| `OpenRouterOptions`, `OpenAIOptions`, `CompatibleOptions`, `OpenAICompatibleConfig` | types                                    |
+| Export                                   | Description                                   |
+| ---------------------------------------- | --------------------------------------------- |
+| `anthropic(modelId, options?)`           | [Claude, natively](/docs/providers#anthropic) |
+| `google(modelId, options?)`              | [Gemini, natively](/docs/providers#gemini)    |
+| `gemini(modelId, options?)`              | Alias of `google`                             |
+| `openai(modelId, options?)`              | OpenAI Chat Completions                       |
+| `openrouter(modelId, options?)`          | [OpenRouter](/docs/providers#openrouter)      |
+| `compatible(modelId, options)`           | Any OpenAI-compatible endpoint                |
+| `createOpenAICompatibleProvider(config)` | The shared OpenAI transport, for building on  |
+
+Option types are exported alongside each: `AnthropicOptions`, `GoogleOptions`,
+`OpenAIOptions`, `OpenRouterOptions`, `CompatibleOptions`, and
+`OpenAICompatibleConfig`.
 
 ## `just-another-sdk/sessions`
 

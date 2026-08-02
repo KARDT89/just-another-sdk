@@ -10,14 +10,14 @@ npm i just-another-sdk
 
 ```ts
 import { Agent, tool } from 'just-another-sdk'
-import { openrouter } from 'just-another-sdk/providers'
+import { anthropic } from 'just-another-sdk/providers'
 import * as z from 'zod'
 
 const agent = new Agent({
   name: 'travel-assistant',
   instructions:
     'Use the tools available to you rather than guessing. Be concise.',
-  model: openrouter('anthropic/claude-opus-5'),
+  model: anthropic('claude-opus-5'),
   tools: [
     tool({
       name: 'get_weather',
@@ -42,8 +42,9 @@ console.log(result.stopReason) // 'finish'
 Because the boring parts are the ones that bite you in production, and most SDKs
 treat them as afterthoughts.
 
-**Zero runtime dependencies.** `npm ls` shows one package. Providers are plain
-`fetch` calls, so there is no vendor SDK to keep in sync, no transitive
+**Zero runtime dependencies.** Every provider is a plain `fetch` call — Claude
+over the Messages API, Gemini over `generateContent`, OpenAI over Chat
+Completions — so there is no vendor SDK to keep in sync, no transitive
 dependency to audit, and the same build runs on Node, Bun, Deno, Cloudflare
 Workers, and Vercel Edge.
 
@@ -111,9 +112,9 @@ const getWeather = tool({
 
 ## Tools in the box
 
-Seventeen tools ship with the package, tiered by how much damage they could do.
-Five pure ones are on **every agent** with nothing imported and nothing
-configured:
+Tools ship with the package, tiered by how much damage they could do. The pure
+ones — maths, time, unit conversion, structured reasoning — are on **every
+agent** with nothing imported and nothing configured:
 
 ```ts
 new Agent({ name: 'assistant', model }).toolNames
@@ -143,9 +144,8 @@ httpFetch({ allow: ['api.example.com'] }) // private + metadata IPs refused even
 fileTools({ root: './workspace' }) // `..`, absolute paths, and symlinks out all refused
 ```
 
-See [Built-in tools](https://github.com/KARDT89/just-another-sdk/blob/main/apps/web/content/docs/built-in-tools.mdx)
-for the full list, the security model, and the ~732 tokens per request the
-automatic five cost.
+See [Built-in tools](https://sdk.tamalsarkar.dev/docs/built-in-tools) for the
+full list, the security model, and what the automatic ones cost per request.
 
 ## Handoffs
 
@@ -298,12 +298,30 @@ return run.toEventResponse() // reconnect later with agent.resume(run.streamId)
 
 ## Models
 
+Three vendors have native transports — a direct `fetch` to their own API, not a
+translation layer:
+
 ```ts
-import { openrouter, openai, compatible } from 'just-another-sdk/providers'
+import { anthropic, google, openai } from 'just-another-sdk/providers'
+import { openrouter, compatible } from 'just-another-sdk/providers'
+
+anthropic('claude-opus-5') // ANTHROPIC_API_KEY — the Messages API
+google('gemini-2.5-pro') // GEMINI_API_KEY or GOOGLE_API_KEY (also exported as `gemini`)
+openai('gpt-5') // OPENAI_API_KEY
 
 openrouter('anthropic/claude-opus-5') // OPENROUTER_API_KEY — hundreds of models, one key
-openai('gpt-5') // OPENAI_API_KEY
 compatible('llama3.1', { baseUrl: 'http://localhost:11434/v1' }) // Ollama, vLLM, Groq, …
+```
+
+Chain them, and an outage on one vendor becomes a line in your trace rather than
+a failed request:
+
+```ts
+new Agent({
+  name: 'assistant',
+  model: anthropic('claude-opus-5'),
+  fallbacks: [google('gemini-2.5-pro'), openai('gpt-5')],
+})
 ```
 
 Writing a provider means implementing one method:
@@ -367,8 +385,8 @@ optional but the whole thing is designed around it.
 
 ## Roadmap
 
-Native Anthropic and Gemini providers · trace exporters for JSON and
-OpenTelemetry · a sandboxed `run_command`.
+Trace exporters for JSON and OpenTelemetry · a sandboxed `run_command` ·
+native Bedrock and Vertex transports.
 
 ## License
 

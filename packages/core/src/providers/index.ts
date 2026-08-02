@@ -6,6 +6,8 @@
  * requires a change to the agent runtime.
  */
 
+export { anthropic, type AnthropicOptions } from './anthropic.js'
+export { google, gemini, type GoogleOptions } from './google.js'
 export { openrouter, type OpenRouterOptions } from './openrouter.js'
 export { openai, compatible, type OpenAIOptions, type CompatibleOptions } from './openai.js'
 export { createOpenAICompatibleProvider, type OpenAICompatibleConfig } from './openai-compatible.js'

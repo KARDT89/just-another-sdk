@@ -133,7 +133,9 @@ export function consoleTracer(options: ConsoleTracerOptions = {}): EventListener
 
       case 'model.retry':
         write(
-          `  ${paint('yellow', '⟳')} retry ${event.attempt}/${event.maxAttempts} ${paint('dim', `· ${event.error.code} · waiting ${event.delayMs}ms`)}`,
+          // Rounded: the backoff carries random jitter, so the raw value is a
+          // long float that reads as noise in a trace.
+          `  ${paint('yellow', '⟳')} retry ${event.attempt}/${event.maxAttempts} ${paint('dim', `· ${event.error.code} · waiting ${Math.round(event.delayMs)}ms`)}`,
         )
         break
 

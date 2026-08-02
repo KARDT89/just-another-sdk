@@ -5,7 +5,7 @@ description: Test agents offline and deterministically, with no API key and no b
 
 Agent tests that hit a real model are slow, flaky, and expensive, so they end up
 not being written. `just-another-sdk/testing` ships the helpers to avoid that —
-the same ones the SDK's own 66 offline tests use, which is why they run in about
+the same ones the SDK's own offline test suite uses, which is why they run in about
 300ms with no key and no network.
 
 ```bash
@@ -377,9 +377,9 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY)('live', () => {
   This is worth the effort. A mock provider proves the *loop* is correct; only a
   real model proves the *wire format* is — request translation, tool-call
   round-tripping, and provider error mapping. This SDK's own live suite caught a
-  bug that all 66 offline tests missed: a run-level timeout was being reported
-  as a network error, because real `fetch` rejects with the abort **reason**
-  object while the mock rejected with a generic `AbortError`.
+  bug the entire offline suite missed: a run-level timeout was being reported as
+  a network error, because real `fetch` rejects with the abort **reason** object
+  while the mock rejected with a generic `AbortError`.
 </Callout>
 
 The SDK's own version of this is

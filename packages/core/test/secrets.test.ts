@@ -11,7 +11,7 @@ import {
   redactString,
   tool,
 } from '../src/index.js'
-import { openrouter } from '../src/providers/index.js'
+import { anthropic, google, openrouter } from '../src/providers/index.js'
 import { collectEvents, mockProvider } from '../src/testing/index.js'
 
 /**
@@ -115,6 +115,53 @@ describe('end-to-end guarantees', () => {
       expect(surface).not.toContain(SECRET)
     }
     // The failure is still diagnosable.
+    expect((error as Error).message).toContain('invalid api key')
+  })
+
+  /**
+   * The same promise, for the two vendors that authenticate with their own
+   * header rather than `Authorization: Bearer`. Gemini is the sharper case: its
+   * key would be trivial to put in the query string, where it would land in
+   * every error message and proxy log — so this also asserts the URL is clean.
+   */
+  it.each([
+    {
+      vendor: 'anthropic',
+      key: 'sk-ant-api03-abcdef0123456789abcdef0123456789',
+      build: (key: string, fetchMock: typeof fetch) =>
+        anthropic('claude-opus-5', { apiKey: key, fetch: fetchMock }),
+    },
+    {
+      vendor: 'google',
+      key: 'AIzaSyD-abcdef0123456789abcdef0123456789',
+      build: (key: string, fetchMock: typeof fetch) =>
+        google('gemini-2.5-pro', { apiKey: key, fetch: fetchMock }),
+    },
+  ])('keeps a $vendor key out of the error and out of the URL', async ({ key, build }) => {
+    let requestedUrl = ''
+    const fetchMock: typeof fetch = async (url) => {
+      requestedUrl = String(url)
+      return new Response(JSON.stringify({ error: { message: 'invalid api key' } }), {
+        status: 401,
+      })
+    }
+
+    const error = await new Agent({ name: 'a', model: build(key, fetchMock), maxRetries: 0 })
+      .run('go')
+      .catch((caught: unknown) => caught)
+
+    const surfaces = [
+      requestedUrl,
+      String(error),
+      (error as Error).message,
+      (error as Error).stack ?? '',
+      JSON.stringify((error as { toJSON: () => unknown }).toJSON()),
+      JSON.stringify((error as { details?: unknown }).details ?? {}),
+    ]
+
+    for (const surface of surfaces) {
+      expect(surface).not.toContain(key)
+    }
     expect((error as Error).message).toContain('invalid api key')
   })
 

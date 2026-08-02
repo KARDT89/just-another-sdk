@@ -1,15 +1,20 @@
 import {
-  AgentError,
   AuthenticationError,
   ConfigurationError,
-  NetworkError,
   ProviderError,
   RateLimitError,
-  TimeoutError,
 } from '../errors/errors.js'
 import { redactHeaders } from '../util/redact.js'
 import { safeStringify } from '../util/stringify.js'
 import { parseSseStream } from './sse.js'
+import {
+  extractErrorMessage,
+  linkSignals,
+  parseRetryAfter,
+  parseToolArguments,
+  resolveFetch,
+  toTransportError,
+} from './transport.js'
 import type {
   FinishReason,
   ModelCallOptions,
@@ -59,12 +64,7 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig): 
     throw new ConfigurationError(`No API key was provided for "${config.providerId}".`)
   }
 
-  const doFetch = config.fetch ?? globalThis.fetch
-  if (typeof doFetch !== 'function') {
-    throw new ConfigurationError('No global `fetch` is available in this runtime.', {
-      hint: 'Use Node 20.19+, or pass a `fetch` implementation to the provider.',
-    })
-  }
+  const doFetch = resolveFetch(config.fetch)
 
   return {
     providerId: config.providerId,
@@ -481,21 +481,6 @@ async function* decodeChatCompletionStream(
   }
 }
 
-/**
- * Tool arguments arrive as a JSON *string*. A model can emit malformed JSON, and
- * that must not crash the run — an unparsable payload is handed to the tool layer
- * as-is, where schema validation rejects it and the model gets a chance to fix
- * its own mistake.
- */
-function parseToolArguments(raw: string | undefined): unknown {
-  if (!raw || raw.trim().length === 0) return {}
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return { __unparsedArguments: raw }
-  }
-}
-
 function mapFinishReason(
   reason: string | null | undefined,
   content: readonly (TextPart | ToolCallPart)[],
@@ -584,100 +569,6 @@ async function toHttpError(
     status: response.status,
     details,
   })
-}
-
-function extractErrorMessage(bodyText: string): string | undefined {
-  if (!bodyText) return undefined
-  try {
-    const parsed = JSON.parse(bodyText) as { error?: { message?: string }; message?: string }
-    return parsed.error?.message ?? parsed.message ?? bodyText.slice(0, 300)
-  } catch {
-    return bodyText.slice(0, 300)
-  }
-}
-
-function parseRetryAfter(header: string | null): number | undefined {
-  if (!header) return undefined
-  const seconds = Number(header)
-  if (Number.isFinite(seconds)) return seconds * 1000
-  const date = Date.parse(header)
-  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined
-}
-
-function toTransportError(cause: unknown, providerId: string, options: ModelCallOptions): Error {
-  // `fetch` rejects with the abort *reason* itself when one was supplied, so a
-  // run-level timeout or an explicit cancellation arrives here already correctly
-  // typed. It must be passed through untouched: its `name` is `TimeoutError`, not
-  // `AbortError`, so the shape check below would misclassify it as a network
-  // failure and tell the caller to check their connectivity.
-  if (cause instanceof AgentError) return cause
-
-  const aborted = isAbortLike(cause)
-
-  if (aborted && options.signal?.aborted) {
-    // The caller cancelled: propagate their reason rather than inventing one.
-    return options.signal.reason instanceof Error
-      ? options.signal.reason
-      : new TimeoutError('The request was aborted.')
-  }
-
-  if (aborted) {
-    return new TimeoutError(`${providerId} did not respond within ${options.timeoutMs ?? 0}ms.`, {
-      hint: 'Raise `modelTimeoutMs` on the agent, or use a faster model.',
-    })
-  }
-
-  return new NetworkError(
-    `Could not reach ${providerId}: ${cause instanceof Error ? cause.message : String(cause)}`,
-    { cause, hint: 'Check network connectivity and the provider base URL.' },
-  )
-}
-
-function isAbortLike(value: unknown): boolean {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'name' in value &&
-    (value as { name?: unknown }).name === 'AbortError'
-  )
-}
-
-/**
- * Combines the caller's signal with a per-call timeout.
- *
- * `AbortSignal.any` is used where available (Node 20+) and hand-rolled
- * otherwise, and `dispose()` always removes listeners so a long-lived caller
- * signal does not accumulate them across thousands of calls.
- */
-function linkSignals(
-  callerSignal: AbortSignal | undefined,
-  timeoutMs: number | undefined,
-): { signal: AbortSignal | undefined; dispose: () => void } {
-  if (!callerSignal && !timeoutMs) return { signal: undefined, dispose: () => {} }
-  if (!timeoutMs) return { signal: callerSignal, dispose: () => {} }
-
-  const timeoutSignal = AbortSignal.timeout(timeoutMs)
-  if (!callerSignal) return { signal: timeoutSignal, dispose: () => {} }
-
-  if (typeof AbortSignal.any === 'function') {
-    return { signal: AbortSignal.any([callerSignal, timeoutSignal]), dispose: () => {} }
-  }
-
-  const controller = new AbortController()
-  const abort = (reason: unknown) => controller.abort(reason)
-  const onCaller = () => abort(callerSignal.reason)
-  const onTimeout = () => abort(timeoutSignal.reason)
-
-  callerSignal.addEventListener('abort', onCaller, { once: true })
-  timeoutSignal.addEventListener('abort', onTimeout, { once: true })
-
-  return {
-    signal: controller.signal,
-    dispose: () => {
-      callerSignal.removeEventListener('abort', onCaller)
-      timeoutSignal.removeEventListener('abort', onTimeout)
-    },
-  }
 }
 
 /* ------------------------------------------------------------------------- */
