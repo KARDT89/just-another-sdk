@@ -1,6 +1,6 @@
 {
   "name": "example-built-in-tools",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "description": "The built-in tool pack: automatic pure tools, keyless web tools, and a sandboxed filesystem.",

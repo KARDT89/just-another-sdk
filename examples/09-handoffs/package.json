@@ -1,6 +1,6 @@
 {
   "name": "example-handoffs",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "type": "module",
   "description": "Routing to specialists, narrowed context, loop prevention, and approval on a transfer — all offline.",
