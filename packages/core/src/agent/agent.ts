@@ -1,6 +1,7 @@
 import { ConfigurationError } from '../errors/errors.js'
 import type { RunResult } from '../run/result.js'
 import { runAgent } from '../run/runner.js'
+import { streamAgent, type StreamedRun } from '../run/stream.js'
 import { ToolRegistry } from '../tools/registry.js'
 import type { AnyTool } from '../tools/tool.js'
 import type { AgentConfig, AgentInput, RunOptions } from './types.js'
@@ -99,6 +100,33 @@ export class Agent {
     options: RunOptions = {},
   ): Promise<RunResult<TOutput>> {
     return runAgent<TOutput>(this.config, input, options)
+  }
+
+  /**
+   * Runs the agent, exposing events as they happen.
+   *
+   * The returned object is both an async iterable of events and awaitable for
+   * the final `RunResult` — use either, or both:
+   *
+   * ```ts
+   * const stream = agent.stream('Explain async iterators.')
+   *
+   * for await (const event of stream) {
+   *   if (event.type === 'text.delta') process.stdout.write(event.delta)
+   * }
+   *
+   * const result = await stream
+   * console.log(`\n${result.usage.outputTokens} tokens`)
+   * ```
+   *
+   * Providers that do not implement `stream()` still work: their answer arrives
+   * as a single `text.delta`, so consuming code needs no special case.
+   *
+   * Deliberately **not** `async` — `await agent.stream(x)` must give you a
+   * `RunResult`, not a promise of a stream.
+   */
+  stream<TOutput = string>(input: AgentInput, options: RunOptions = {}): StreamedRun<TOutput> {
+    return streamAgent<TOutput>(this.config, input, options)
   }
 
   /**

@@ -184,6 +184,46 @@ interface ModelResponse {
 }
 ```
 
+### Streaming is optional
+
+`stream()` is the only optional method on the contract. Implement it to emit
+tokens as they arrive; omit it and [`agent.stream()`](/docs/streaming) still
+works, delivering the whole answer as a single `text.delta`.
+
+```ts
+interface ModelProvider {
+  generate(request, options?): Promise<ModelResponse>
+
+  stream?(request, options?): AsyncIterable<ModelStreamChunk>
+}
+
+type ModelStreamChunk =
+  | { type: 'text-delta'; text: string }
+  | {
+      type: 'tool-call-delta'
+      toolCallId: string
+      toolName?: string
+      inputDelta: string
+    }
+  | { type: 'finish'; response: ModelResponse }
+```
+
+Two obligations if you do implement it:
+
+- **End with a `finish` chunk** carrying a complete `ModelResponse` — the same
+  object `generate()` would have returned. The runtime tolerates its absence by
+  reconstructing one, but the reconstruction has no usage figures.
+- **Reassemble tool calls yourself.** Vendors fragment arguments across chunks;
+  `tool-call-delta` exists so a provider _can_ report them, but the runtime never
+  forwards fragments to user code. The complete, parsed call belongs in the
+  `finish` chunk.
+
+Timeouts apply to the whole stream, not to time-to-first-byte.
+
+If you are wrapping an SSE endpoint, `text/event-stream` framing is already
+solved — the OpenAI-compatible transport uses a vendor-neutral parser that
+handles chunk-boundary splits, keep-alive comments, and multi-line data fields.
+
 ### Translating errors
 
 Map vendor failures onto the SDK's error types so callers can handle them
@@ -205,9 +245,8 @@ throw new ProviderError(`… returned ${response.status}`, {
 
 ## Coming next
 
-Native Anthropic (Messages API) and Gemini (`generateContent`) providers, plus
-streaming and model fallback chains. Both vendors are already reachable today
-through OpenRouter.
+Native Anthropic (Messages API) and Gemini (`generateContent`) providers. Both
+vendors are already reachable today through OpenRouter.
 
 ## Next
 

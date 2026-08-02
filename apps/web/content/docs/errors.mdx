@@ -108,36 +108,97 @@ catch (error) {
 }
 ```
 
-## Retrying
+## Retries
 
-Automatic retries are not in the runtime yet, so for now retry at the call site.
-`retryable` tells you when it is worth it:
+Retryable model calls are retried automatically. The defaults are on — a 429 or a
+dropped connection recovers without any code from you:
 
 ```ts
-async function runWithRetry(prompt: string, attempts = 3) {
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await agent.run(prompt)
-    } catch (error) {
-      const retryable = isAgentError(error) && error.retryable
-      if (!retryable || attempt === attempts) throw error
-
-      const wait =
-        error instanceof RateLimitError && error.retryAfterMs
-          ? error.retryAfterMs
-          : 2 ** attempt * 250
-
-      await new Promise((resolve) => setTimeout(resolve, wait))
-    }
-  }
-  throw new Error('unreachable')
-}
+const agent = new Agent({
+  name: 'assistant',
+  model: openrouter('anthropic/claude-opus-5'),
+  maxRetries: 2, // the default: up to 3 attempts per model call
+})
 ```
 
-<Callout type="info">
-  Retries with backoff, per-attempt jitter, and model fallback chains are the
-  next milestone. When they land, this hand-rolled loop becomes a config option.
-</Callout>
+| Option            | Default  | Description                                           |
+| ----------------- | -------- | ----------------------------------------------------- |
+| `maxRetries`      | `2`      | Extra attempts after the first. `0` disables retries. |
+| `retryDelayMs`    | `250`    | Base of the exponential curve.                        |
+| `maxRetryDelayMs` | `10_000` | Ceiling on any single wait.                           |
+| `retryOn`         | —        | Replaces the default `error.retryable` predicate.     |
+
+`maxRetries` can also be overridden per run: `agent.run(prompt, { maxRetries: 0 })`.
+
+Retries are **per model call**, not per run: a failed attempt is replayed with the
+identical request, so there is no partial state to unwind. Tool failures are
+deliberately outside this — they are fed back to the model as results, which is a
+better recovery mechanism than blind repetition.
+
+### The backoff curve
+
+Exponential with **full jitter** — the wait is a random value in
+`[0, min(base × 2ⁿ, cap))`. Jitter spreads a thundering herd across the whole
+window instead of clustering every client at the end of it.
+
+Two rules govern a provider's `Retry-After`:
+
+- **It is a floor, not a value.** A small jitter is added on top. Sleeping exactly
+  what the server asked guarantees every rate-limited client returns in the same
+  millisecond.
+- **One longer than `maxRetryDelayMs` is not honoured.** The call fails
+  immediately instead, with `retryAfterMs` still on the error so you can schedule
+  it yourself. Blocking an `await` for five minutes because a gateway said so is
+  worse than an actionable failure.
+
+Cancellation takes effect _during_ a backoff, not after it — an aborted run does
+not sit out a ten-second wait.
+
+### What is never retried
+
+Cancellation, always. Beyond that the `retryable` flag decides, and `retryOn`
+replaces it when your provider needs different rules:
+
+```ts
+new Agent({
+  name: 'assistant',
+  model: openrouter('anthropic/claude-opus-5'),
+  // This gateway 400s on transient capacity problems.
+  retryOn: (error) => error.retryable || error.message.includes('capacity'),
+})
+```
+
+## Model fallback
+
+`fallbacks` is a chain tried in order once the primary is spent:
+
+```ts
+const agent = new Agent({
+  name: 'assistant',
+  model: openrouter('anthropic/claude-opus-5'),
+  fallbacks: [openrouter('openai/gpt-5'), openrouter('google/gemini-3-pro')],
+})
+```
+
+- A fallback also takes over on a **non-retryable** failure. A bad key or an
+  unknown model on the primary is exactly when a second vendor should serve;
+  retrying it could never have worked.
+- **Cancellation never falls back.**
+- **The chain resets to the primary each turn**, so a transient outage cannot
+  permanently demote your preferred model.
+- If the whole chain fails, the run rejects with the **last** provider's error —
+  the real failure, not an aggregate wrapper.
+
+Which model actually served a turn is recorded on `steps[].modelId`, and both
+`model.retry` and `model.fallback` appear in the [event
+stream](/docs/events) so a trace shows what happened:
+
+```text
+▶ run_m9x2k1p  assistant · anthropic/claude-opus-5
+  ⟳ retry 1/3 · rate_limit_error · waiting 412ms
+  ⇄ fallback → openai/gpt-5 · after provider_error
+✔ finish · 1 turn · 412 in / 63 out · 2.1s
+```
 
 ## Messages carry the fix
 

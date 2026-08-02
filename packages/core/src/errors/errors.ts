@@ -19,7 +19,6 @@ export type AgentErrorCode =
   | 'invalid_tool_input'
   | 'tool_execution_error'
   | 'tool_not_found'
-  | 'max_turns_exceeded'
   | 'invalid_schema'
 
 export interface AgentErrorOptions {
@@ -213,4 +212,19 @@ function isRetryableStatus(status: number | undefined): boolean {
 /** Narrowing helper so callers do not need to import every subclass. */
 export function isAgentError(value: unknown): value is AgentError {
   return value instanceof AgentError
+}
+
+/**
+ * Guarantees callers only ever catch an `AgentError`.
+ *
+ * Lives here rather than beside the loop because the runner, the retry policy,
+ * and the model-call seam all need it, and importing it from the runner would
+ * make those modules circular.
+ */
+export function toAgentError(cause: unknown): AgentError {
+  if (cause instanceof AgentError) return cause
+  return new AgentError(cause instanceof Error ? cause.message : String(cause), {
+    code: 'provider_error',
+    cause,
+  })
 }

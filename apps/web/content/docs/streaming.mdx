@@ -1,65 +1,188 @@
 ---
 title: Streaming
-description: Token-by-token output and an async-iterator event API.
+description: Token-by-token output from an object that is both an async iterable and a promise.
 ---
 
-<Callout type="warn">
-  **Not shipped yet.** The event stream and the provider `stream()` hook already
-  exist in the runtime, so this is a surface to build on top of them rather than
-  a redesign. Track it in [the
-  repository](https://github.com/KARDT89/just-another-sdk/issues).
-</Callout>
-
-Today you observe a run through [`onEvent`](/docs/events), which fires
-`model.response` once per turn — after the model finishes that turn. Streaming
-adds `text.delta` events and an iterator you can drive a UI from.
-
-## Intended API
+`agent.stream()` runs the agent and reports progress as it happens. What it
+returns is an async iterable of [events](/docs/events) that is **also awaitable**
+for the final `RunResult`:
 
 ```ts
-for await (const event of agent.stream('Write a short story about Paris.')) {
+const stream = agent.stream('Write a short story about Paris.')
+
+for await (const event of stream) {
   if (event.type === 'text.delta') process.stdout.write(event.delta)
+}
+
+const result = await stream // the same run, now finished
+console.log(`\n${result.usage.outputTokens} tokens`)
+```
+
+Both halves are optional. Awaiting without iterating is an ordinary `run()` that
+happens to buffer its events; iterating without awaiting is a pure UI feed.
+
+## Just the text
+
+Most UIs only want the tokens, so there is a shortcut:
+
+```ts
+for await (const chunk of agent.stream(prompt).textStream()) {
+  ui.append(chunk)
 }
 ```
 
-Awaiting the same call gives the final result, so the two styles compose:
+`textStream()` consumes the same single iteration as the event stream — use one
+or the other, not both.
+
+## It is the same loop
+
+`stream()` is not a parallel implementation of the agent loop. It runs the
+_identical_ runtime with a listener attached, which is why streamed and
+non-streamed runs cannot drift apart: same turn accounting, same tool execution,
+same stopping rules, same `RunResult`.
+
+The only difference is where the model's text comes from — `provider.stream()`
+instead of `provider.generate()`.
+
+## Providers without streaming
+
+`stream()` is optional on the [provider contract](/docs/providers#writing-a-provider).
+A provider that does not implement it still works: its answer arrives as a single
+`text.delta` immediately before `model.response`.
+
+That means a renderer written against `text.delta` works against **every**
+provider, and adding streaming to a custom provider later changes only how
+smoothly it paints — never whether the code runs.
+
+## Event order
+
+A streamed run emits the same events in the same order as a normal run, with
+`text.delta` interleaved:
+
+```text
+run.start
+  model.request → text.delta* → model.response
+  tool.start … tool.end …
+  model.request → text.delta* → model.response
+run.finish
+```
+
+Two consequences worth relying on:
+
+- **Tool execution never overlaps streamed text.** Not by policy — by
+  construction. The model's turn must reach its end before its tool calls are
+  known, so there is no text left to stream when a tool starts.
+- **Tool arguments are never partial.** Providers stream them in fragments, but
+  those are reassembled and validated inside the runtime. `tool.start` fires once
+  per call, carrying exactly the input a non-streaming run would produce. No
+  event in the union ever carries half a JSON object.
+
+## Cancelling
+
+`break` does **not** cancel the run. The work is already in flight and already
+billable, and because the stream doubles as a promise, cancelling on `break`
+would break the natural "read a bit, then take the result" pattern:
+
+```ts
+for await (const event of stream) {
+  if (sawEnough(event)) break
+}
+const result = await stream // still resolves
+```
+
+To actually stop the run, use `.abort()` or pass a signal:
 
 ```ts
 const stream = agent.stream(prompt)
+setTimeout(() => stream.abort(), 5_000)
 
-for await (const event of stream) {
-  if (event.type === 'text.delta') ui.append(event.delta)
+try {
+  for await (const event of stream) render(event)
+} catch (error) {
+  if (isAgentError(error) && error.code === 'aborted') ui.setStatus('Cancelled')
 }
-
-const result = await stream // RunResult, once the run completes
 ```
 
-## Already in place
+## Failures
 
-- `text.delta` is a member of the [`AgentEvent`](/docs/events#event-reference)
-  union, so consumers written today will not need to change shape.
-- `ModelProvider.stream?()` is an optional method on the
-  [provider contract](/docs/providers#writing-a-provider). Providers that do not
-  implement it fall back to `generate()`, so streaming will never be a hard
-  requirement for a custom provider.
+A failing streamed run reports itself twice, so neither consumption style misses
+it:
 
-## What has to be decided
+- The iterator yields `run.error` as its **last event**, then throws.
+- `await stream` (or `.completed`) rejects with the same `AgentError`.
 
-- Backpressure when a consumer reads slower than the model produces.
-- Whether tool execution interleaves with streamed text or pauses it.
-- Whether partial tool-call arguments are surfaced, or only completed calls.
+Iterating without ever awaiting does not produce an unhandled rejection — the
+runtime marks the result promise as handled for exactly this case.
 
-## Meanwhile
+## Buffering, not backpressure
 
-For progress feedback without streaming, `onEvent` gives you per-turn and
-per-tool granularity, which is enough for a "thinking…" indicator and a live tool
-log:
+Events are buffered without bound rather than applying pressure to the producer.
+This is deliberate:
+
+- The event bus is **synchronous by contract** — the loop never awaits a
+  listener, so instrumentation cannot slow down or reorder a run. Blocking the
+  producer would break that for every `onEvent` consumer, not just streaming ones.
+- Real backpressure cannot reach the thing that costs money. To slow the model
+  you would have to stop reading its socket; it keeps generating and you keep
+  paying.
+- The buffer is already bounded by the run itself: at most `maxTurns` model calls,
+  each capped by `maxOutputTokens`, and every token is retained for `RunResult`
+  anyway.
+
+A slow consumer therefore sees every event, in order, however far behind it runs.
+
+## One consumer per run
+
+A `StreamedRun` can be iterated once. A second iteration throws a
+`ConfigurationError` rather than silently yielding nothing. Use `.completed` for
+the result, or collect what you need in a single loop.
+
+<Callout type="warn">
+  **Returning a stream from an `async` function unwraps it.** Any object with a
+  `then` method is recursively resolved by the promise machinery, so
 
 ```ts
-await agent.run(prompt, {
-  onEvent: (event) => {
-    if (event.type === 'tool.start') ui.setStatus(`Calling ${event.toolName}…`)
-    if (event.type === 'model.request') ui.setStatus('Thinking…')
-  },
-})
+async function go() {
+  return agent.stream(prompt) // ⚠️ resolves to RunResult, not StreamedRun
+}
 ```
+
+Wrap it when it has to cross an `async` boundary intact:
+
+```ts
+async function go() {
+  return { stream: agent.stream(prompt) } // ✅
+}
+```
+
+</Callout>
+
+## Retries mid-stream
+
+If an attempt fails _after_ it has already streamed tokens, the retry starts its
+text over. The [`model.retry`](/docs/events) event carries `discardedText` — the
+exact characters already delivered and now void:
+
+```ts
+for await (const event of stream) {
+  if (event.type === 'text.delta') ui.append(event.delta)
+  if (event.type === 'model.retry') ui.removeLast(event.discardedText.length)
+}
+```
+
+In the common case it is empty: a rate limit or a refused connection fails before
+any bytes arrive. See [error handling](/docs/errors#retries) for the retry
+policy itself.
+
+## API
+
+| Member                     | Description                                                       |
+| -------------------------- | ----------------------------------------------------------------- |
+| `[Symbol.asyncIterator]()` | Yields every `AgentEvent`. Once per run.                          |
+| `await stream`             | The final `RunResult`.                                            |
+| `.completed`               | The same result as a real `Promise`, for `.catch()`/`.finally()`. |
+| `.textStream()`            | Yields only `text.delta` strings.                                 |
+| `.abort(reason?)`          | Cancels the run: the model call and any running tools.            |
+
+`streamAgent(config, input, options)` is the functional form, for when an `Agent`
+instance would not be reused.

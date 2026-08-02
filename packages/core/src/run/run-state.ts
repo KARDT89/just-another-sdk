@@ -79,10 +79,10 @@ export class RunState {
   }
 
   /** Records a completed turn: its step, its usage, and the serving model. */
-  completeTurn(step: RunStep, modelId: string): void {
+  completeTurn(step: RunStep): void {
     this.stepLog.push(step)
     this.usageTotal = addUsage(this.usageTotal, step.usage)
-    this.lastModelId = modelId
+    this.lastModelId = step.modelId
     this.turnCount += 1
   }
 

@@ -121,16 +121,18 @@ onEvent: (event) => {
 
 Every event carries `id`, `timestamp`, `runId`, and `agentName`.
 
-| Type             | When                                    | Notable fields                                             |
-| ---------------- | --------------------------------------- | ---------------------------------------------------------- |
-| `run.start`      | Always first                            | `modelId`, `input`, `toolNames`                            |
-| `model.request`  | Before each model call                  | `turn`, `messageCount`, `tools`                            |
-| `model.response` | After each model call, before tools run | `text`, `toolCalls`, `finishReason`, `usage`, `durationMs` |
-| `tool.start`     | Before a tool runs, arguments validated | `toolName`, `toolCallId`, `input`                          |
-| `tool.end`       | After a tool finishes or fails          | `result`, `isError`, `durationMs`                          |
-| `run.finish`     | Last event on a successful run          | `stopReason`, `text`, `turns`, `usage`, `durationMs`       |
-| `run.error`      | Last event when the run throws          | `error`, `turn`                                            |
-| `text.delta`     | Streaming only _(coming next)_          | `delta`                                                    |
+| Type             | When                                    | Notable fields                                                |
+| ---------------- | --------------------------------------- | ------------------------------------------------------------- |
+| `run.start`      | Always first                            | `modelId`, `input`, `toolNames`                               |
+| `model.request`  | Before each model call                  | `turn`, `messageCount`, `tools`                               |
+| `model.response` | After each model call, before tools run | `text`, `toolCalls`, `finishReason`, `usage`, `durationMs`    |
+| `tool.start`     | Before a tool runs, arguments validated | `toolName`, `toolCallId`, `input`                             |
+| `tool.end`       | After a tool finishes or fails          | `result`, `isError`, `durationMs`                             |
+| `run.finish`     | Last event on a successful run          | `stopReason`, `text`, `turns`, `usage`, `durationMs`          |
+| `run.error`      | Last event when the run throws          | `error`, `turn`                                               |
+| `text.delta`     | Streamed runs only                      | `delta`                                                       |
+| `model.retry`    | A failed call will be attempted again   | `attempt`, `maxAttempts`, `error`, `delayMs`, `discardedText` |
+| `model.fallback` | The chain moved to the next provider    | `fromModelId`, `toModelId`, `index`, `error`                  |
 
 For a tool-using run the order is deterministic:
 
@@ -142,6 +144,33 @@ run.start
   model.request → model.response
 run.finish
 ```
+
+A [streamed run](/docs/streaming) is the same sequence with `text.delta`
+interleaved, always between the request and the response for that turn:
+
+```text
+run.start
+  model.request → text.delta* → model.response
+  tool.start … tool.end …
+  model.request → text.delta* → model.response
+run.finish
+```
+
+`model.request` fires **once per turn**, not once per attempt — retries and
+fallbacks announce themselves with their own events instead.
+
+### Undoing discarded text
+
+When an attempt fails after streaming real tokens, its output is void and the
+retry starts over. `model.retry` and `model.fallback` both carry `discardedText`:
+exactly the characters already delivered that a renderer must remove.
+
+```ts
+if (event.type === 'model.retry') ui.removeLast(event.discardedText.length)
+```
+
+It is empty in the common case — a rate limit or a refused connection fails
+before any bytes arrive.
 
 ## Partial state from a failed run
 
@@ -200,8 +229,7 @@ over data that already exists rather than new plumbing.
 
 ## Coming next
 
-An async-iterator API for streaming (`for await (const event of agent.stream(…))`),
-plus trace exporters for JSON and OpenTelemetry.
+Trace exporters for JSON and OpenTelemetry.
 
 ## Next
 

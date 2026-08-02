@@ -54,6 +54,14 @@ export interface CompatibleOptions extends OpenAIOptions {
   readonly baseUrl: string
   /** Some local servers need no key; a placeholder is sent to satisfy the header. */
   readonly apiKey?: string
+  /**
+   * Merged into every request body, overriding what the SDK would otherwise
+   * send. The escape hatch for endpoints that diverge from the OpenAI schema.
+   *
+   * Older vLLM builds and some Ollama versions reject `stream_options` with a
+   * 400; `{ stream_options: null }` removes it while leaving streaming on.
+   */
+  readonly defaultBody?: Readonly<Record<string, unknown>>
 }
 
 /**
@@ -78,5 +86,6 @@ export function compatible(modelId: string, options: CompatibleOptions): ModelPr
     apiKey: options.apiKey ?? 'not-required',
     headers: options.headers ?? {},
     ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.defaultBody ? { defaultBody: options.defaultBody } : {}),
   })
 }

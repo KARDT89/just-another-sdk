@@ -23,6 +23,7 @@
     "web": "pnpm --filter web dev",
     "example:hello": "pnpm --filter example-hello-agent start",
     "example:tools": "pnpm --filter example-tool-calling start",
+    "example:stream": "pnpm --filter example-streaming start",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "turbo run build --filter=just-another-sdk && changeset publish"

@@ -10,16 +10,16 @@ change in a patch release.
 
 ### Agents
 
-| Export            | Kind     | Description                                                                             |
-| ----------------- | -------- | --------------------------------------------------------------------------------------- |
-| `Agent`           | class    | The agent. `new Agent(config)`, `.run()`, `.clone()`, `.withTools()`, `.toConfig()`     |
-| `run`             | function | `run(config, input, options)` — shorthand for a one-shot agent                          |
-| `runAgent`        | function | The loop itself, if you want it without the `Agent` wrapper                             |
-| `AGENT_DEFAULTS`  | const    | `{ maxTurns: 10, toolTimeoutMs: 30000, modelTimeoutMs: 120000, onToolError: 'return' }` |
-| `AgentConfig`     | type     | Constructor options — see [Agents](/docs/agents#configuration)                          |
-| `RunOptions`      | type     | Per-run options                                                                         |
-| `AgentInput`      | type     | `string \| ModelMessage[]`                                                              |
-| `ToolErrorPolicy` | type     | `'return' \| 'throw'`                                                                   |
+| Export            | Kind     | Description                                                                                                                                               |
+| ----------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Agent`           | class    | The agent. `new Agent(config)`, `.run()`, `.stream()`, `.clone()`, `.withTools()`                                                                         |
+| `run`             | function | `run(config, input, options)` — shorthand for a one-shot agent                                                                                            |
+| `runAgent`        | function | The loop itself, if you want it without the `Agent` wrapper                                                                                               |
+| `AGENT_DEFAULTS`  | const    | `maxTurns: 10`, `toolTimeoutMs: 30000`, `modelTimeoutMs: 120000`, `onToolError: 'return'`, `maxRetries: 2`, `retryDelayMs: 250`, `maxRetryDelayMs: 10000` |
+| `AgentConfig`     | type     | Constructor options — see [Agents](/docs/agents#configuration)                                                                                            |
+| `RunOptions`      | type     | Per-run options                                                                                                                                           |
+| `AgentInput`      | type     | `string \| ModelMessage[]`                                                                                                                                |
+| `ToolErrorPolicy` | type     | `'return' \| 'throw'`                                                                                                                                     |
 
 ### Tools
 
@@ -34,25 +34,45 @@ change in a patch release.
 
 ### Results
 
-| Export       | Kind     | Description                                        |
-| ------------ | -------- | -------------------------------------------------- |
-| `RunResult`  | type     | What `run()` resolves with                         |
-| `RunStep`    | type     | One turn: text, tool calls, results, usage, timing |
-| `StopReason` | type     | `'finish' \| 'max_turns'`                          |
-| `isComplete` | function | `result.stopReason === 'finish'`                   |
+| Export       | Kind     | Description                                                   |
+| ------------ | -------- | ------------------------------------------------------------- |
+| `RunResult`  | type     | What `run()` resolves with                                    |
+| `RunStep`    | type     | One turn: text, tool calls, results, usage, timing, `modelId` |
+| `StopReason` | type     | `'finish' \| 'max_turns'`                                     |
+| `isComplete` | function | `result.stopReason === 'finish'`                              |
+
+### Streaming
+
+| Export        | Kind     | Description                                                                 |
+| ------------- | -------- | --------------------------------------------------------------------------- |
+| `streamAgent` | function | `streamAgent(config, input, options)` — the functional form of `.stream()`  |
+| `StreamedRun` | type     | Async-iterable **and** awaitable. `.completed`, `.textStream()`, `.abort()` |
+
+See [Streaming](/docs/streaming).
+
+### Reliability
+
+| Export        | Kind | Description                                                |
+| ------------- | ---- | ---------------------------------------------------------- |
+| `RetryPolicy` | type | `maxRetries`, `retryDelayMs`, `maxRetryDelayMs`, `retryOn` |
+
+Configured as flat fields on `AgentConfig`, alongside `fallbacks: ModelProvider[]`.
+See [Errors → Retries](/docs/errors#retries).
 
 ### Events
 
-| Export                            | Kind     | Description                                      |
-| --------------------------------- | -------- | ------------------------------------------------ |
-| `consoleTracer`                   | function | Ready-made listener that prints a readable trace |
-| `ConsoleTracerOptions`            | type     | `verbose`, `color`, `write`, `maxValueLength`    |
-| `EventEmitter`                    | class    | The run's event bus                              |
-| `AgentEvent`                      | type     | Union of every event                             |
-| `AgentEventType`                  | type     | `'run.start' \| 'model.request' \| …`            |
-| `EventOfType<T>`                  | type     | Narrows `AgentEvent` by `type`                   |
-| `EventListener`                   | type     | `(event: AgentEvent) => void`                    |
-| `RunStartEvent` … `RunErrorEvent` | type     | Individual event shapes                          |
+| Export                            | Kind     | Description                                          |
+| --------------------------------- | -------- | ---------------------------------------------------- |
+| `consoleTracer`                   | function | Ready-made listener that prints a readable trace     |
+| `ConsoleTracerOptions`            | type     | `verbose`, `color`, `write`, `maxValueLength`        |
+| `EventEmitter`                    | class    | The run's event bus                                  |
+| `AgentEvent`                      | type     | Union of every event                                 |
+| `AgentEventType`                  | type     | `'run.start' \| 'model.request' \| …`                |
+| `EventOfType<T>`                  | type     | Narrows `AgentEvent` by `type`                       |
+| `EventListener`                   | type     | `(event: AgentEvent) => void`                        |
+| `RunStartEvent` … `RunErrorEvent` | type     | Individual event shapes                              |
+| `ModelRetryEvent`                 | type     | `attempt`, `maxAttempts`, `delayMs`, `discardedText` |
+| `ModelFallbackEvent`              | type     | `fromModelId`, `toModelId`, `index`, `error`         |
 
 ### Errors
 
@@ -71,6 +91,7 @@ change in a patch release.
 | `ToolNotFoundError`             | `tool_not_found`                            |
 | `InvalidSchemaError`            | `invalid_schema`                            |
 | `isAgentError`                  | narrowing helper                            |
+| `toAgentError`                  | wraps any thrown value as an `AgentError`   |
 | `AgentErrorCode`, `SchemaIssue` | types                                       |
 
 ### Messages

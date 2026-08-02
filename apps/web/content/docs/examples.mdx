@@ -94,6 +94,46 @@ Recovered from 1 tool failure(s): get_air_quality
 The last line is the point: a tool failed, and the run still produced a useful
 answer.
 
+## 3 — Streaming
+
+Four short acts against one agent, each demonstrating one thing:
+
+- tokens painted as they arrive
+- `textStream()`, then awaiting the **same object** for usage and timing
+- streaming with a deliberately slow tool, so the ordering guarantee is visible
+- cancelling a run mid-flight with `.abort()`
+
+The agent is also configured with `maxRetries` and a `fallbacks` chain, so a rate
+limit or an outage recovers without any code in the example.
+
+```bash
+pnpm example:stream
+```
+
+```text
+── 1. Tokens as they arrive ──────────────────────────────────────
+Async iterators exist so a consumer can pull values that are not
+ready yet, without blocking or buffering the whole sequence first.
+
+── 3. Streaming with tools ───────────────────────────────────────
+(text pauses while the tool runs, then resumes)
+
+Let me look that up.
+  ↳ look_up_fact({"topic":"TypeScript"})
+    → 803ms
+TypeScript was standardised in 1997, which matters because…
+
+── 4. Cancelling mid-stream ──────────────────────────────────────
+Concurrency has a long history, beginning with the earliest
+
+  ✔ cancelled cleanly — the model call was aborted mid-flight
+```
+
+The renderer in that file is worth copying: the only real difficulty in painting
+a stream is that `text.delta` writes a partial line while everything else wants a
+whole one. Tracking whether the cursor is mid-line, and breaking before any
+non-delta output, is the entire trick.
+
 ## Patterns worth copying
 
 ### A shared agent in a server route

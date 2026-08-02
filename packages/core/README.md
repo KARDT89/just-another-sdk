@@ -240,8 +240,8 @@ optional but the whole thing is designed around it.
 
 ## Roadmap
 
-Streaming · sessions and memory adapters · structured output · guardrails and
-approval gates · multi-agent handoffs · native Anthropic and Gemini providers.
+Sessions and memory adapters · structured output · guardrails and approval
+gates · multi-agent handoffs · native Anthropic and Gemini providers.
 
 ## License
 

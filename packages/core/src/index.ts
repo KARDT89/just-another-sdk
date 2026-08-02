@@ -53,6 +53,15 @@ export { isComplete } from './run/result.js'
 export type { RunResult, RunStep, StopReason } from './run/result.js'
 export { runAgent } from './run/runner.js'
 
+/* ── Streaming ───────────────────────────────────────────────────────────── */
+
+export { streamAgent } from './run/stream.js'
+export type { StreamedRun } from './run/stream.js'
+
+/* ── Reliability ─────────────────────────────────────────────────────────── */
+
+export type { RetryPolicy } from './run/retry.js'
+
 /* ── Events ──────────────────────────────────────────────────────────────── */
 
 export { consoleTracer, type ConsoleTracerOptions } from './events/console-tracer.js'
@@ -62,8 +71,10 @@ export type {
   AgentEventType,
   EventListener,
   EventOfType,
+  ModelFallbackEvent,
   ModelRequestEvent,
   ModelResponseEvent,
+  ModelRetryEvent,
   RunErrorEvent,
   RunFinishEvent,
   RunStartEvent,
@@ -88,6 +99,7 @@ export {
   ToolExecutionError,
   ToolNotFoundError,
   isAgentError,
+  toAgentError,
 } from './errors/errors.js'
 export type { AgentErrorCode, AgentErrorOptions, SchemaIssue } from './errors/errors.js'
 

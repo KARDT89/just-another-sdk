@@ -76,6 +76,18 @@ export function consoleTracer(options: ConsoleTracerOptions = {}): EventListener
         break
       }
 
+      case 'model.retry':
+        write(
+          `  ${paint('yellow', '⟳')} retry ${event.attempt}/${event.maxAttempts} ${paint('dim', `· ${event.error.code} · waiting ${event.delayMs}ms`)}`,
+        )
+        break
+
+      case 'model.fallback':
+        write(
+          `  ${paint('yellow', '⇄')} fallback ${paint('dim', '→')} ${event.toModelId} ${paint('dim', `· after ${event.error.code}`)}`,
+        )
+        break
+
       case 'run.error':
         write(`${paint('red', '✗')} ${event.error.code}: ${event.error.message.split('\n')[0]}`)
         break

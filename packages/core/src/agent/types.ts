@@ -1,3 +1,4 @@
+import type { AgentError } from '../errors/errors.js'
 import type { ModelProvider, ToolChoice } from '../providers/provider.js'
 import type { AnyTool } from '../tools/tool.js'
 import type { AgentEvent } from '../events/events.js'
@@ -55,6 +56,45 @@ export interface AgentConfig {
   /** Deadline for a single model call in ms. Default 120_000. */
   readonly modelTimeoutMs?: number
 
+  /**
+   * Extra attempts per model call after the first. Default 2, so a call is made
+   * at most 3 times. Set 0 to disable retries entirely.
+   *
+   * Only errors whose `retryable` flag is set are retried, and cancellation
+   * never is. See {@link AgentConfig.retryOn} to change the predicate.
+   */
+  readonly maxRetries?: number
+
+  /** Base of the exponential backoff curve in ms. Default 250. */
+  readonly retryDelayMs?: number
+
+  /**
+   * Ceiling on any single backoff wait in ms. Default 10_000.
+   *
+   * Also the limit on how far a provider's `Retry-After` will be honoured: one
+   * asking for longer than this fails immediately rather than blocking the
+   * caller's `await`, with `retryAfterMs` still on the error so you can
+   * reschedule it yourself.
+   */
+  readonly maxRetryDelayMs?: number
+
+  /**
+   * Replaces the default predicate (`error.retryable`) entirely. `attempt` is
+   * 1-based. Cancellation is never retried regardless of what this returns.
+   */
+  readonly retryOn?: (error: AgentError, attempt: number) => boolean
+
+  /**
+   * Models to try, in order, once the primary has exhausted its retries.
+   *
+   * A fallback also takes over on a *non*-retryable failure — a bad key or an
+   * unknown model on the primary is exactly when a second vendor should serve.
+   * The chain resets to the primary at the start of every turn, so a transient
+   * outage cannot permanently demote the preferred model. Which model served a
+   * given turn is recorded on `steps[].modelId`.
+   */
+  readonly fallbacks?: readonly ModelProvider[]
+
   /** Free-form tags passed to providers that support them, and to traces. */
   readonly metadata?: Readonly<Record<string, string>>
 }
@@ -80,6 +120,9 @@ export interface RunOptions {
   /** Overrides {@link AgentConfig.toolChoice} for this run only. */
   readonly toolChoice?: ToolChoice
 
+  /** Overrides {@link AgentConfig.maxRetries} for this run only. */
+  readonly maxRetries?: number
+
   /**
    * Observe the run as it happens. Synchronous and fire-and-forget: a throwing
    * listener is swallowed so instrumentation can never break a run.
@@ -99,9 +142,15 @@ export const AGENT_DEFAULTS: {
   readonly toolTimeoutMs: number
   readonly modelTimeoutMs: number
   readonly onToolError: ToolErrorPolicy
+  readonly maxRetries: number
+  readonly retryDelayMs: number
+  readonly maxRetryDelayMs: number
 } = Object.freeze({
   maxTurns: 10,
   toolTimeoutMs: 30_000,
   modelTimeoutMs: 120_000,
   onToolError: 'return',
+  maxRetries: 2,
+  retryDelayMs: 250,
+  maxRetryDelayMs: 10_000,
 })

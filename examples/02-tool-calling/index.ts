@@ -86,6 +86,11 @@ try {
     model: openrouter(MODEL),
     tools: [getWeather, getTime, getAirQuality],
     maxTurns: 6,
+    // A rate limit or a dropped connection is retried with jittered backoff, and
+    // if this model stays unavailable the run moves down the chain. Both are
+    // configuration, not code — see examples/03-streaming for the events they emit.
+    maxRetries: 3,
+    fallbacks: [openrouter(process.env['OPENROUTER_FALLBACK_MODEL'] ?? MODEL)],
   })
 
   console.log('\n── Turn 1 ' + '─'.repeat(58))

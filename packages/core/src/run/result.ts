@@ -32,6 +32,12 @@ export interface RunStep {
   readonly usage: Usage
   /** Wall-clock duration of the model call plus tool execution, ms. */
   readonly durationMs: number
+  /**
+   * The model that actually served this turn. Differs from the agent's
+   * configured model when a `fallbacks` entry took over, which is how a fallback
+   * becomes visible in a trace after the fact.
+   */
+  readonly modelId: string
 }
 
 /**

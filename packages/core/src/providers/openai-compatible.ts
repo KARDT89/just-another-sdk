@@ -9,12 +9,14 @@ import {
 } from '../errors/errors.js'
 import { redactHeaders } from '../util/redact.js'
 import { safeStringify } from '../util/stringify.js'
+import { parseSseStream } from './sse.js'
 import type {
   FinishReason,
   ModelCallOptions,
   ModelProvider,
   ModelRequest,
   ModelResponse,
+  ModelStreamChunk,
   ToolChoice,
   ToolDefinition,
 } from './provider.js'
@@ -72,12 +74,7 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig): 
       const url = `${config.baseUrl}/chat/completions`
       const body = buildRequestBody(config.modelId, request, config.defaultBody)
 
-      const headers: Record<string, string> = {
-        'content-type': 'application/json',
-        authorization: `Bearer ${config.apiKey}`,
-        ...config.headers,
-        ...options.headers,
-      }
+      const headers = buildHeaders(config, options)
 
       const { signal, dispose } = linkSignals(options.signal, options.timeoutMs)
 
@@ -113,6 +110,64 @@ export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig): 
 
       return parseResponse(payload, config)
     },
+
+    async *stream(
+      request: ModelRequest,
+      options: ModelCallOptions = {},
+    ): AsyncGenerator<ModelStreamChunk> {
+      const url = `${config.baseUrl}/chat/completions`
+      const body = buildRequestBody(config.modelId, request, config.defaultBody, { stream: true })
+
+      const headers = buildHeaders(config, options)
+
+      // The same deadline `generate()` uses, with one semantic difference worth
+      // knowing: it now bounds the *whole* stream, not time-to-first-byte.
+      const { signal, dispose } = linkSignals(options.signal, options.timeoutMs)
+
+      try {
+        let response: Response
+        try {
+          response = await doFetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            ...(signal ? { signal } : {}),
+          })
+        } catch (cause) {
+          throw toTransportError(cause, config.providerId, options)
+        }
+
+        if (!response.ok) {
+          throw await toHttpError(response, config.providerId, headers)
+        }
+
+        if (!response.body) {
+          throw new ProviderError(
+            `${config.providerId} returned no response body for a streaming request.`,
+            {
+              status: response.status,
+              hint: 'The provider may not support `stream: true` on this endpoint.',
+            },
+          )
+        }
+
+        yield* decodeChatCompletionStream(response.body, config, options)
+      } finally {
+        dispose()
+      }
+    },
+  }
+}
+
+function buildHeaders(
+  config: OpenAICompatibleConfig,
+  options: ModelCallOptions,
+): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    authorization: `Bearer ${config.apiKey}`,
+    ...config.headers,
+    ...options.headers,
   }
 }
 
@@ -124,6 +179,7 @@ function buildRequestBody(
   modelId: string,
   request: ModelRequest,
   defaultBody: Readonly<Record<string, unknown>> | undefined,
+  options: { readonly stream: boolean } = { stream: false },
 ): Record<string, unknown> {
   const messages: WireMessage[] = []
 
@@ -139,6 +195,11 @@ function buildRequestBody(
   const body: Record<string, unknown> = {
     model: modelId,
     messages,
+    // Emitted *before* the user's overrides on purpose. A handful of
+    // OpenAI-compatible servers (older vLLM, some Ollama builds) reject
+    // `stream_options` with a 400, and `providerOptions: { stream_options: null }`
+    // is the escape hatch.
+    ...(options.stream ? { stream: true, stream_options: { include_usage: true } } : {}),
     ...defaultBody,
     ...request.providerOptions,
   }
@@ -290,6 +351,133 @@ function parseResponse(
     usage: mapUsage(payload.usage),
     modelId: payload.model ?? config.modelId,
     raw: payload,
+  }
+}
+
+/**
+ * Turns a chat-completions SSE body into `ModelStreamChunk`s, then one final
+ * `finish` chunk carrying a fully-formed `ModelResponse`.
+ *
+ * The response is assembled through the exact same helpers `parseResponse` uses,
+ * so a streamed turn and a non-streamed turn are indistinguishable downstream —
+ * including the tolerant `__unparsedArguments` path for a truncated tool call.
+ */
+async function* decodeChatCompletionStream(
+  body: ReadableStream<Uint8Array>,
+  config: OpenAICompatibleConfig,
+  options: ModelCallOptions,
+): AsyncGenerator<ModelStreamChunk> {
+  let text = ''
+  // Keyed by the wire's `index`, which is the only thing correlating a
+  // fragment to its call — `id` and `name` arrive once and never repeat.
+  const toolCalls = new Map<number, { id: string; name: string; args: string }>()
+  let finishReason: string | null | undefined
+  let usage: WireUsage | undefined
+  let servingModel: string | undefined
+  let parsedFrames = 0
+
+  try {
+    for await (const event of parseSseStream(body)) {
+      // The terminator is not JSON and must never be parsed as such.
+      if (event.data === '[DONE]') break
+
+      let payload: ChatCompletionChunk
+      try {
+        payload = JSON.parse(event.data) as ChatCompletionChunk
+      } catch {
+        // Tolerate one bad frame — a truncated keep-alive, a gateway artefact.
+        // A stream where *nothing* parsed is a different problem, caught below.
+        continue
+      }
+      parsedFrames += 1
+
+      // Some gateways report failure mid-stream instead of with a status code.
+      // Thrown in the same shape `parseResponse` uses for a 200-with-error-body,
+      // so `run()` and `stream()` fail identically.
+      if (payload.error) {
+        throw new ProviderError(
+          `${config.providerId}: ${payload.error.message ?? 'unknown provider error'}`,
+          { details: { code: payload.error.code, type: payload.error.type } },
+        )
+      }
+
+      if (payload.model) servingModel = payload.model
+      // With `include_usage`, totals arrive in a final chunk whose `choices` is [].
+      if (payload.usage) usage = payload.usage
+
+      const choice = payload.choices?.[0]
+      if (!choice) continue
+
+      if (choice.finish_reason) finishReason = choice.finish_reason
+
+      const delta = choice.delta
+      if (!delta) continue
+
+      if (typeof delta.content === 'string' && delta.content.length > 0) {
+        text += delta.content
+        yield { type: 'text-delta', text: delta.content }
+      }
+
+      for (const fragment of delta.tool_calls ?? []) {
+        const index = fragment.index ?? 0
+        const slot = toolCalls.get(index) ?? {
+          // Synthesized only for a vendor that never sends an id. It stays
+          // stable for the whole stream, so the `tool_call_id` echoed back to
+          // the model matches what we reported.
+          id: fragment.id ?? `call_${index}`,
+          name: '',
+          args: '',
+        }
+
+        if (fragment.id) slot.id = fragment.id
+        if (fragment.function?.name) slot.name = fragment.function.name
+        if (fragment.function?.arguments) slot.args += fragment.function.arguments
+        toolCalls.set(index, slot)
+
+        yield {
+          type: 'tool-call-delta',
+          toolCallId: slot.id,
+          ...(slot.name ? { toolName: slot.name } : {}),
+          inputDelta: fragment.function?.arguments ?? '',
+        }
+      }
+    }
+  } catch (cause) {
+    // Covers a mid-stream socket reset, a run-level abort, and the per-call
+    // deadline — all already classified correctly by the shared mapper.
+    throw toTransportError(cause, config.providerId, options)
+  }
+
+  if (parsedFrames === 0) {
+    throw new ProviderError(`${config.providerId} returned a malformed event stream.`, {
+      hint: 'The endpoint may not support streaming, or returned a non-SSE body.',
+      details: { modelId: config.modelId },
+    })
+  }
+
+  const content: (TextPart | ToolCallPart)[] = []
+  if (text.length > 0) content.push({ type: 'text', text })
+
+  for (const [, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
+    content.push({
+      type: 'tool-call',
+      toolCallId: call.id,
+      toolName: call.name,
+      input: parseToolArguments(call.args),
+    })
+  }
+
+  yield {
+    type: 'finish',
+    response: {
+      content,
+      finishReason: mapFinishReason(finishReason, content),
+      usage: mapUsage(usage),
+      modelId: servingModel ?? config.modelId,
+      // A stream has no single payload, and buffering every frame to synthesize
+      // one would defeat the point. A summary is the honest thing to expose.
+      raw: { streamed: true, frames: parsedFrames },
+    },
   }
 }
 
@@ -532,4 +720,32 @@ interface ChatCompletionResponse {
       tool_calls?: WireToolCall[]
     }
   }[]
+}
+
+/**
+ * One SSE frame of a streamed completion.
+ *
+ * Everything is optional because every field genuinely is: a chunk may carry
+ * only a token, only a tool-call fragment, only `usage` (the final
+ * `include_usage` frame, whose `choices` is empty), or only a finish reason.
+ */
+interface ChatCompletionChunk {
+  model?: string
+  usage?: WireUsage
+  error?: { message?: string; code?: string; type?: string }
+  choices?: {
+    finish_reason?: string | null
+    delta?: {
+      content?: string | null
+      tool_calls?: WireToolCallDelta[]
+    }
+  }[]
+}
+
+/** A tool call arriving in pieces. Only `index` is present on every fragment. */
+interface WireToolCallDelta {
+  index?: number
+  id?: string
+  type?: 'function'
+  function?: { name?: string; arguments?: string }
 }

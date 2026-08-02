@@ -127,6 +127,53 @@ describe('end-to-end guarantees', () => {
     expect(JSON.stringify(collected.events)).not.toContain(SECRET)
   })
 
+  /**
+   * A retried call carries its error into a `model.retry` event, which a tracer
+   * or a log pipeline will happily serialize. The redaction that protects a
+   * thrown error has to protect the survivable one too.
+   */
+  it('keeps the key out of a retry event and the trace line it produces', async () => {
+    let attempt = 0
+    const fetchMock: typeof fetch = async () => {
+      attempt += 1
+      if (attempt === 1) {
+        return new Response(JSON.stringify({ error: { message: 'slow down' } }), {
+          status: 429,
+          headers: { 'retry-after': '0' },
+        })
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ finish_reason: 'stop', message: { content: 'ok' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }
+
+    const lines: string[] = []
+    const collected = collectEvents()
+
+    const result = await new Agent({
+      name: 'a',
+      model: openrouter('m', { apiKey: SECRET, fetch: fetchMock }),
+      retryDelayMs: 1,
+    }).run('go', {
+      onEvent: (event) => {
+        collected.listener(event)
+        consoleTracer({ color: false, write: (line) => lines.push(line) })(event)
+      },
+    })
+
+    expect(result.text).toBe('ok')
+    expect(collected.events.some((event) => event.type === 'model.retry')).toBe(true)
+
+    // The event payload, everything the tracer printed, and the error inside it.
+    expect(JSON.stringify(collected.events)).not.toContain(SECRET)
+    expect(lines.join('\n')).not.toContain(SECRET)
+    expect(lines.join('\n')).toContain('rate_limit_error')
+  })
+
   it('redacts a credential that a tool returns, before the tracer prints it', async () => {
     const lines: string[] = []
     const leaky = tool({

@@ -4,7 +4,7 @@ import {
   type AgentInput,
   type RunOptions,
 } from '../agent/types.js'
-import { AbortError, AgentError, TimeoutError } from '../errors/errors.js'
+import { AbortError, TimeoutError, toAgentError } from '../errors/errors.js'
 import { EventEmitter } from '../events/emitter.js'
 import { toolCallsOf, textOf } from '../providers/provider.js'
 import type { ModelRequest, ModelResponse } from '../providers/provider.js'
@@ -13,7 +13,9 @@ import { ToolRegistry } from '../tools/registry.js'
 import { assistantMessage, toolMessage, userMessage } from '../types/messages.js'
 import type { ModelMessage, ToolResultPart } from '../types/messages.js'
 import { createRunId } from '../util/id.js'
+import { callModel } from './model-call.js'
 import type { RunResult, StopReason } from './result.js'
+import { resolveRetryPolicy, throwIfAborted } from './retry.js'
 import { RunState } from './run-state.js'
 
 /**
@@ -51,6 +53,35 @@ export async function runAgent<TOutput = string>(
   input: AgentInput,
   options: RunOptions = {},
 ): Promise<RunResult<TOutput>> {
+  return executeRun<TOutput>(config, input, options, { streaming: false })
+}
+
+/**
+ * Knobs the loop needs that are not the caller's business.
+ *
+ * Keeping `streaming` here rather than on `RunOptions` means there is exactly
+ * one loop implementation without exposing a flag that only the SDK's own
+ * `agent.stream()` should ever set.
+ *
+ * @internal
+ */
+export interface RunInternals {
+  /** Prefer `provider.stream()` when the provider implements it. */
+  readonly streaming: boolean
+}
+
+/**
+ * The loop itself. Imported by `run/stream.ts`; never exported from the package
+ * root.
+ *
+ * @internal
+ */
+export async function executeRun<TOutput = string>(
+  config: AgentConfig,
+  input: AgentInput,
+  options: RunOptions,
+  internals: RunInternals,
+): Promise<RunResult<TOutput>> {
   const registry = new ToolRegistry(config.tools)
   const maxTurns = options.maxTurns ?? config.maxTurns ?? AGENT_DEFAULTS.maxTurns
   const onToolError = config.onToolError ?? AGENT_DEFAULTS.onToolError
@@ -87,6 +118,11 @@ export async function runAgent<TOutput = string>(
   const metadata = mergeMetadata(config, options)
   const modelTimeoutMs = config.modelTimeoutMs ?? AGENT_DEFAULTS.modelTimeoutMs
 
+  // The chain is rebuilt from the primary at the start of every turn, so a
+  // transient outage cannot permanently demote the preferred model.
+  const providers = [config.model, ...(config.fallbacks ?? [])]
+  const retryPolicy = resolveRetryPolicy(config, options)
+
   try {
     let stopReason: StopReason = 'max_turns'
 
@@ -119,10 +155,48 @@ export async function runAgent<TOutput = string>(
       })
 
       const modelStartedAt = Date.now()
-      const response: ModelResponse = await config.model.generate(request, {
+      const outcome = await callModel({
+        providers,
+        request,
         signal,
         timeoutMs: modelTimeoutMs,
+        retry: retryPolicy,
+        streaming: internals.streaming,
+        onTextDelta: (delta) => {
+          events.emit({ type: 'text.delta', runId, agentName: config.name, turn, delta })
+        },
+        onRetry: (info) => {
+          events.emit({
+            type: 'model.retry',
+            runId,
+            agentName: config.name,
+            turn,
+            modelId: info.provider.modelId,
+            providerId: info.provider.providerId,
+            attempt: info.attempt,
+            maxAttempts: info.maxAttempts,
+            error: info.error,
+            delayMs: info.delayMs,
+            discardedText: info.discardedText,
+          })
+        },
+        onFallback: (info) => {
+          events.emit({
+            type: 'model.fallback',
+            runId,
+            agentName: config.name,
+            turn,
+            fromModelId: info.from.modelId,
+            fromProviderId: info.from.providerId,
+            toModelId: info.to.modelId,
+            toProviderId: info.to.providerId,
+            index: info.index,
+            error: info.error,
+            discardedText: info.discardedText,
+          })
+        },
       })
+      const response: ModelResponse = outcome.response
       const modelDurationMs = Date.now() - modelStartedAt
 
       const text = textOf(response)
@@ -148,18 +222,16 @@ export async function runAgent<TOutput = string>(
 
       // No tool calls means the model has answered: this is the exit.
       if (toolCalls.length === 0) {
-        state.completeTurn(
-          {
-            turn,
-            text,
-            toolCalls: [],
-            toolResults: [],
-            finishReason: response.finishReason,
-            usage: response.usage,
-            durationMs: Date.now() - turnStartedAt,
-          },
-          response.modelId,
-        )
+        state.completeTurn({
+          turn,
+          text,
+          toolCalls: [],
+          toolResults: [],
+          finishReason: response.finishReason,
+          usage: response.usage,
+          durationMs: Date.now() - turnStartedAt,
+          modelId: response.modelId,
+        })
         stopReason = 'finish'
         break
       }
@@ -202,18 +274,16 @@ export async function runAgent<TOutput = string>(
       const results: ToolResultPart[] = outcomes.map((outcome) => outcome.result)
       state.append(toolMessage(results))
 
-      state.completeTurn(
-        {
-          turn,
-          text,
-          toolCalls,
-          toolResults: results,
-          finishReason: response.finishReason,
-          usage: response.usage,
-          durationMs: Date.now() - turnStartedAt,
-        },
-        response.modelId,
-      )
+      state.completeTurn({
+        turn,
+        text,
+        toolCalls,
+        toolResults: results,
+        finishReason: response.finishReason,
+        usage: response.usage,
+        durationMs: Date.now() - turnStartedAt,
+        modelId: response.modelId,
+      })
 
       // A cancelled run must not silently continue into another model call.
       const aborted = outcomes.find((outcome) => outcome.error?.code === 'aborted')
@@ -358,18 +428,4 @@ function createRunSignal(options: RunOptions): { signal: AbortSignal; dispose: (
       for (const cleanup of cleanups) cleanup()
     },
   }
-}
-
-function throwIfAborted(signal: AbortSignal): void {
-  if (!signal.aborted) return
-  throw signal.reason instanceof AgentError ? signal.reason : new AbortError()
-}
-
-/** Guarantees callers only ever catch an `AgentError`. */
-function toAgentError(cause: unknown): AgentError {
-  if (cause instanceof AgentError) return cause
-  return new AgentError(cause instanceof Error ? cause.message : String(cause), {
-    code: 'provider_error',
-    cause,
-  })
 }

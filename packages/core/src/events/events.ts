@@ -60,6 +60,51 @@ export interface TextDeltaEvent extends EventBase {
   readonly delta: string
 }
 
+/**
+ * A model call failed and will be attempted again against the same provider.
+ *
+ * Only fires when a retry is actually going to happen — the final, giving-up
+ * failure surfaces as a thrown error, not as an event.
+ */
+export interface ModelRetryEvent extends EventBase {
+  readonly type: 'model.retry'
+  readonly turn: number
+  readonly modelId: string
+  readonly providerId: string
+  /** 1-based index of the attempt that just failed. */
+  readonly attempt: number
+  /** Total attempts that will be made against this provider. */
+  readonly maxAttempts: number
+  readonly error: AgentError
+  /** How long the runtime will wait before the next attempt, ms. */
+  readonly delayMs: number
+  /**
+   * Text already delivered as `text.delta` for the failed attempt, and now void.
+   *
+   * Empty in the common case — a 429 or a connection refusal fails before any
+   * bytes arrive. When it is not empty, a renderer that has already painted
+   * those characters must remove exactly this many before the retry streams its
+   * own text.
+   */
+  readonly discardedText: string
+}
+
+/** The provider chain moved on after the previous provider was exhausted. */
+export interface ModelFallbackEvent extends EventBase {
+  readonly type: 'model.fallback'
+  readonly turn: number
+  readonly fromModelId: string
+  readonly fromProviderId: string
+  readonly toModelId: string
+  readonly toProviderId: string
+  /** 0-based position of the new provider in `[model, ...fallbacks]`. */
+  readonly index: number
+  /** The error that exhausted the previous provider. */
+  readonly error: AgentError
+  /** See {@link ModelRetryEvent.discardedText}. */
+  readonly discardedText: string
+}
+
 /** A tool is about to run, with arguments already validated. */
 export interface ToolStartEvent extends EventBase {
   readonly type: 'tool.start'
@@ -102,6 +147,8 @@ export type AgentEvent =
   | ModelRequestEvent
   | ModelResponseEvent
   | TextDeltaEvent
+  | ModelRetryEvent
+  | ModelFallbackEvent
   | ToolStartEvent
   | ToolEndEvent
   | RunFinishEvent

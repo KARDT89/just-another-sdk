@@ -77,8 +77,48 @@ expect(second.at(-1)?.role).toBe('tool')
       description:
         'Delay before responding — for testing timeouts and cancellation.',
     },
+    textChunks: {
+      type: 'string[]',
+      description:
+        'How text is split when streamed. Defaults to a word-level split.',
+    },
+    chunkDelayMs: {
+      type: 'number',
+      description: 'Delay between streamed chunks — for slow-consumer tests.',
+    },
+    errorAfterChunks: {
+      type: 'number',
+      description:
+        'Fail mid-stream after this many chunks, so a retry has discarded text.',
+    },
   }}
 />
+
+### Streaming
+
+The mock implements `stream()` as well as `generate()`, and both derive their
+response from the same place — so "the deltas concatenate to the final text" is
+guaranteed by construction rather than something your test has to assume:
+
+```ts
+const model = mockProvider([{ text: 'Hello there.' }])
+const stream = new Agent({ name: 'test', model }).stream('hi')
+
+let streamed = ''
+for await (const chunk of stream.textStream()) streamed += chunk
+
+expect(streamed).toBe((await stream).text)
+```
+
+To test the fallback for providers that do not stream, omit the method entirely:
+
+```ts
+const model = mockProvider([{ text: 'ok' }], { supportsStreaming: false })
+// agent.stream() still works; `model.streamCallCount` stays 0.
+```
+
+Tool calls stream as two fragments each, so argument reassembly is genuinely
+exercised. `streamCallCount` tells you which path a run took.
 
 ### Dynamic responses
 
