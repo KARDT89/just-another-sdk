@@ -7,5 +7,14 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["web", "example-hello-agent", "example-tool-calling"]
+  "ignore": [
+    "web",
+    "example-hello-agent",
+    "example-tool-calling",
+    "example-streaming",
+    "example-sessions",
+    "example-chat-server",
+    "example-resumable",
+    "example-structured"
+  ]
 }
