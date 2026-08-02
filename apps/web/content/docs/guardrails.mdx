@@ -3,15 +3,7 @@ title: Guardrails
 description: Input and output validation, tool gating, and human approval.
 ---
 
-<Callout type="warn">
-  **Not shipped yet.** Some of what guardrails are usually used for is already
-  covered by existing features — see *What works today* below.
-</Callout>
-
-## Intended API
-
-Guardrails are functions that inspect something and either allow it, rewrite it,
-or reject it.
+Three places to say no, and one place to ask a person.
 
 ```ts
 const agent = new Agent({
@@ -20,83 +12,293 @@ const agent = new Agent({
   tools: [refundOrder],
 
   inputGuardrails: [
-    // Reject before spending a single token
-    (input) =>
-      input.length > 10_000 ? { reject: 'Message too long.' } : { allow: true },
+    {
+      name: 'max-length',
+      check: (input) =>
+        input.length > 10_000
+          ? { reject: 'Message too long.' }
+          : { allow: true },
+    },
   ],
 
   outputGuardrails: [
-    // Redact before the answer reaches the user
-    (text) => ({ allow: true, replace: stripPII(text) }),
+    {
+      name: 'pii-scrub',
+      check: (text) => ({ allow: true, replace: stripPII(text) }),
+    },
   ],
 
-  toolGuardrails: {
-    // Gate a specific tool
-    refund_order: async ({ input }) =>
-      input.amount > 100 ? { requireApproval: true } : { allow: true },
+  toolGuardrails: [
+    {
+      name: 'refund-cap',
+      tools: ['refund_order'],
+      check: ({ input }) =>
+        input.amount > 100 ? { requireApproval: true } : { allow: true },
+    },
+  ],
+})
+```
+
+Every guardrail can **allow**, **rewrite**, or **reject**. Tool guardrails can
+also **require approval**, which suspends the run for a human.
+
+## Why they carry a name
+
+The name is not decoration. A triggered guardrail shows up in the event stream
+and the trace, and `guardrail #1 triggered` is useless when you are reading
+production logs. It is the same reason `tool()` takes a name.
+
+There is no `guardrail()` helper to match `tool()`. That one exists to infer a
+handler's input from a schema and memoize JSON Schema derivation; a guardrail
+needs neither, so a plain object is the whole story.
+
+## Input guardrails
+
+Run after any session history loads and **before the first model call**, so a
+rejection costs nothing:
+
+```ts
+const result = await agent.run(hugePaste) // throws GuardrailError
+// model.calls.length === 0
+```
+
+They run **in declaration order, one at a time**, so a rewrite is visible to the
+next guardrail — scrub, then length-check. The first rejection wins and the rest
+are not called.
+
+A rewrite replaces the run's new user turn. `context.messages` carries the whole
+conversation if you need to decide based on what came before.
+
+## Output guardrails
+
+Run against the final answer, before it reaches you _or_ the session:
+
+```ts
+outputGuardrails: [
+  {
+    name: 'pii-scrub',
+    check: (text) => ({ allow: true, replace: stripPII(text) }),
   },
-})
+]
 ```
 
-### Approval
-
-A tool that requires approval suspends the run instead of executing:
-
-```ts
-const result = await agent.run('Refund order 1234')
-
-if (result.stopReason === 'awaiting_approval') {
-  const decision = await askHuman(result.pendingApproval)
-  const final = await agent.resume(result, decision)
-}
-```
-
-This needs run state to be serializable across a process boundary, which is why
-it is scheduled alongside [sessions](/docs/sessions).
-
-## What works today
-
-Several things people reach for guardrails to do are already covered:
-
-**Dangerous tool calls** — validate in the schema, so an out-of-range value never
-reaches your handler:
-
-```ts
-inputSchema: z.object({
-  amount: z.number().positive().max(100), // over 100 is rejected, model is told why
-})
-```
-
-**Approval, manually** — gate inside the handler. It is not as clean as a
-declarative guardrail, but it works and it is explicit:
-
-```ts
-execute: async ({ orderId, amount }) => {
-  if (amount > 100) {
-    const approved = await requestApproval({ orderId, amount })
-    if (!approved)
-      return { refused: true, reason: 'A human declined this refund.' }
-  }
-  return processRefund(orderId, amount)
-}
-```
-
-Returning a refusal rather than throwing is usually better: the model reads it and
-explains the outcome to the user.
-
-**Blast-radius limits** — `onToolError: 'throw'` on anything with side effects, so
-a failed write is never improvised around:
+They are typed on the agent's output. With an
+[`outputSchema`](/docs/structured-output) a guardrail receives the **validated
+object**, not raw text — so a rewrite cannot break the schema contract:
 
 ```ts
 const agent = new Agent({
-  name: 'payments',
+  name: 'triage',
   model,
-  tools: [charge],
-  onToolError: 'throw',
+  outputSchema: Ticket,
+  outputGuardrails: [
+    {
+      name: 'escalate-vip',
+      check: (ticket) => ({ allow: true, replace: { ...ticket, severity: 5 } }),
+    },
+  ],
 })
 ```
 
-**Input length** — check before calling `run()`. No framework needed.
+`context.text` still carries the raw JSON when you want to scan it.
 
-**Secret leakage** — already guaranteed. An API key cannot reach an error, an
-event, or a trace; see [Errors](/docs/errors#secret-safety).
+<Callout type="info">
+  A rewrite updates the **transcript** as well as the return value. Scrubbing
+  only what you get back would leave the original in the session and hand it
+  straight to the model on the next turn — which would defeat the point.
+</Callout>
+
+## Tool guardrails
+
+Run after a tool's arguments validate and **before its handler executes**, so
+you inspect coerced values you can trust:
+
+```ts
+toolGuardrails: [
+  { name: 'refund-cap', tools: ['refund_order'], check: ({ input }) => … },
+  { name: 'confirm-writes', check: ({ toolName }) => … }, // every tool
+]
+```
+
+Omit `tools` to gate everything. A name in `tools` that is not a registered tool
+is rejected by the `Agent` constructor rather than ignored — a typo in a safety
+control must not fail open silently.
+
+**A blocked call is not a run failure.** The model receives an error result,
+reads it, and routes around it:
+
+```ts
+result.stopReason // 'finish' — the run completed
+result.steps[0].toolResults[0].isError // true
+```
+
+<Callout type="info">
+  This holds under `onToolError: 'throw'` too. That flag is for "a tool broke,
+  so abort" — a guardrail refusing a call is a policy decision working
+  correctly, not a broken tool, so it does not trip it.
+</Callout>
+
+Tool guardrails deliberately **cannot rewrite** arguments. The seam sits after
+the schema precisely so the values are trustworthy; writing back would either
+bypass that schema or need a second validation pass. Clamp in the schema
+(`z.number().max(100)`) or in the handler — a guardrail decides _whether_, not
+_what_.
+
+## A guardrail that throws fails closed
+
+An exception inside `check` becomes a rejection, with the original error as
+`cause`. It is never treated as an allow.
+
+This is the deliberate opposite of an [`onEvent`](/docs/events) listener, whose
+throw is swallowed, and of [summarizing](/docs/sessions), which falls back to
+plain trimming. Those are optimisations, where losing the feature loses nothing
+important. A guardrail is a safety control, and a broken one must not wave
+traffic through.
+
+## Human approval
+
+A `requireApproval` verdict suspends the run **before any tool in that turn
+executes** and throws `ApprovalRequiredError`:
+
+```ts
+import { ApprovalRequiredError } from 'just-another-sdk'
+
+try {
+  const result = await agent.run('Refund order 1234')
+} catch (error) {
+  if (!(error instanceof ApprovalRequiredError)) throw error
+
+  const decisions = await Promise.all(
+    error.suspension.pending.calls.map(async (call) => ({
+      toolCallId: call.toolCallId,
+      approved: await askHuman(call), // call.toolName, call.input, call.reason
+    })),
+  )
+
+  const final = await agent.resumeApproval(error.suspension, decisions)
+}
+```
+
+`suspension` is plain JSON. Store it, send it to another process, decide an hour
+later — there is no `ApprovalStore` to implement and no adapter per backend,
+because there is no state the SDK has to hold.
+
+A denial is not an error either: the model receives your `reason` as a tool
+result and explains itself.
+
+```ts
+{ toolCallId, approved: false, reason: 'Outside policy this month.' }
+```
+
+<Callout type="warn">
+  **`resumeApproval`, not `resume`.**
+  [`agent.resume(streamId)`](/docs/streaming) re-attaches a reader to a recorded
+  event stream — a different thing entirely.
+</Callout>
+
+### If any call needs approval, none of them run
+
+A turn can hold several tool calls. If one is gated, **none** execute:
+
+```ts
+// The model asked for lookup_customer AND refund_order.
+// Neither ran. After resumeApproval, each runs exactly once.
+```
+
+Running the ungated ones first would execute them again on resume — a duplicated
+side effect, which is the exact failure an approval gate exists to prevent.
+
+### Resume in the trace
+
+A resumed run records the carried-over calls as a step, but not as a turn:
+
+```ts
+result.steps.map((s) => s.kind) // ['resume', 'turn']
+result.turns // 1 — `maxTurns` stays the ceiling it claims to be
+```
+
+## Security
+
+Stateless approval means the SDK **cannot authenticate a decision** — that would
+need a shared secret or a store, and it has neither. Be clear-eyed about what it
+does and does not give you.
+
+What holds structurally:
+
+1. **Ids are not invented.** A decision must reference a `toolCallId` that exists
+   as a tool call in the conversation you supplied.
+2. **An unknown id fails loud** — a `ConfigurationError` listing the ids that
+   _were_ expected, rather than a silent re-suspend with nothing to debug.
+3. **An approval authorises one call, once.** Only the resume step reads your
+   decisions; the in-loop gate never does. If the model calls the same gated tool
+   again later in the run, it suspends again. This is a property of the code
+   shape, not a check that can rot.
+4. **An approval cannot override a `reject`.** The guardrails are re-run on
+   resume; `approved: true` satisfies a `requireApproval` and nothing else.
+
+What does **not** hold: an attacker replaying a captured `{ suspension,
+decisions }` payload against your endpoint. You own that transport.
+
+<Callout type="warn">
+  **Do not round-trip `suspension` through a browser.** It contains the entire
+  conversation. Persist it server-side under an id you mint, and send the client
+  only `suspension.pending` — which carries the tool name, arguments, and
+  reason, and no conversation.
+</Callout>
+
+For the same reason, `ApprovalRequiredError.toJSON()` omits the messages: that is
+the log-safe form the console tracer and the SSE serializer both print.
+
+## Events
+
+| Event                 | When                                                 |
+| --------------------- | ---------------------------------------------------- |
+| `guardrail.triggered` | A guardrail rejected, rewrote, or asked for approval |
+| `approval.required`   | The run is suspending; carries the pending calls     |
+| `approval.resolved`   | A decision was applied during a resume               |
+
+`guardrail.triggered` deliberately never carries the value being judged — events
+cross an SSE boundary, and a rejected input is unbounded and often user-supplied.
+`approval.required` _does_ carry the tool arguments, because an approval UI
+cannot render "approve this refund?" without them.
+
+## Testing
+
+Everything here is testable offline with `mockProvider`:
+
+```ts
+it('blocks the dangerous tool but still finishes', async () => {
+  const model = mockProvider([
+    { toolCalls: [{ toolName: 'delete_account', input: { id: 'u1' } }] },
+    { text: 'I cannot do that.' },
+  ])
+
+  const result = await new Agent({
+    name: 'test',
+    model,
+    tools: [deleteAccount],
+    toolGuardrails: [
+      { name: 'read-only', check: () => ({ reject: 'Read-only.' }) },
+    ],
+  }).run('delete u1')
+
+  expect(result.stopReason).toBe('finish')
+  expect(result.steps[0].toolResults[0].isError).toBe(true)
+})
+```
+
+See [`pnpm example:guardrails`](/docs/examples) — it runs entirely offline.
+
+## Errors
+
+| Class                   | Code                | Carries                         |
+| ----------------------- | ------------------- | ------------------------------- |
+| `GuardrailError`        | `guardrail_blocked` | `guardrail`, `stage`, `subject` |
+| `ApprovalRequiredError` | `approval_required` | `suspension`                    |
+
+`GuardrailError.subject` is on the instance and not in `details`, so it stays out
+of `toJSON()` — same rule as
+[`InvalidOutputError.rawText`](/docs/structured-output).
+
+Tool guardrails do not raise `GuardrailError`; a blocked call is a recoverable
+tool result instead.

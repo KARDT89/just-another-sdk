@@ -121,21 +121,24 @@ onEvent: (event) => {
 
 Every event carries `id`, `timestamp`, `runId`, and `agentName`.
 
-| Type             | When                                     | Notable fields                                                |
-| ---------------- | ---------------------------------------- | ------------------------------------------------------------- |
-| `run.start`      | Always first                             | `modelId`, `input`, `toolNames`                               |
-| `session.load`   | History loaded, before the first call    | `sessionId`, `messageCount`, `droppedCount`, `durationMs`     |
-| `model.request`  | Before each model call                   | `turn`, `messageCount`, `tools`                               |
-| `model.response` | After each model call, before tools run  | `text`, `toolCalls`, `finishReason`, `usage`, `durationMs`    |
-| `tool.start`     | Before a tool runs, arguments validated  | `toolName`, `toolCallId`, `input`                             |
-| `tool.end`       | After a tool finishes or fails           | `result`, `isError`, `durationMs`                             |
-| `session.save`   | New messages written back, on completion | `sessionId`, `appendedCount`, `durationMs`                    |
-| `run.finish`     | Last event on a successful run           | `stopReason`, `text`, `turns`, `usage`, `durationMs`          |
-| `run.error`      | Last event when the run throws           | `error`, `turn`                                               |
-| `text.delta`     | Streamed runs only                       | `delta`                                                       |
-| `model.retry`    | A failed call will be attempted again    | `attempt`, `maxAttempts`, `error`, `delayMs`, `discardedText` |
-| `model.fallback` | The chain moved to the next provider     | `fromModelId`, `toModelId`, `index`, `error`                  |
-| `output.invalid` | An answer failed `outputSchema`          | `turn`, `attempt`, `maxAttempts`, `issues`, `repairing`       |
+| Type                  | When                                     | Notable fields                                                |
+| --------------------- | ---------------------------------------- | ------------------------------------------------------------- |
+| `run.start`           | Always first                             | `modelId`, `input`, `toolNames`                               |
+| `session.load`        | History loaded, before the first call    | `sessionId`, `messageCount`, `droppedCount`, `durationMs`     |
+| `model.request`       | Before each model call                   | `turn`, `messageCount`, `tools`                               |
+| `model.response`      | After each model call, before tools run  | `text`, `toolCalls`, `finishReason`, `usage`, `durationMs`    |
+| `tool.start`          | Before a tool runs, arguments validated  | `toolName`, `toolCallId`, `input`                             |
+| `tool.end`            | After a tool finishes or fails           | `result`, `isError`, `durationMs`                             |
+| `session.save`        | New messages written back, on completion | `sessionId`, `appendedCount`, `durationMs`                    |
+| `run.finish`          | Last event on a successful run           | `stopReason`, `text`, `turns`, `usage`, `durationMs`          |
+| `run.error`           | Last event when the run throws           | `error`, `turn`                                               |
+| `text.delta`          | Streamed runs only                       | `delta`                                                       |
+| `model.retry`         | A failed call will be attempted again    | `attempt`, `maxAttempts`, `error`, `delayMs`, `discardedText` |
+| `model.fallback`      | The chain moved to the next provider     | `fromModelId`, `toModelId`, `index`, `error`                  |
+| `output.invalid`      | An answer failed `outputSchema`          | `turn`, `attempt`, `maxAttempts`, `issues`, `repairing`       |
+| `guardrail.triggered` | A guardrail rejected, rewrote, or gated  | `guardrail`, `stage`, `action`, `toolName?`, `reason?`        |
+| `approval.required`   | The run suspended for a human            | `turn`, `calls`                                               |
+| `approval.resolved`   | A decision was applied on resume         | `toolCallId`, `toolName`, `approved`, `reason?`               |
 
 For a tool-using run the order is deterministic:
 

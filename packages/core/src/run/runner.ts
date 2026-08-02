@@ -6,6 +6,7 @@ import {
 } from '../agent/types.js'
 import {
   AbortError,
+  ApprovalRequiredError,
   ConfigurationError,
   InvalidOutputError,
   TimeoutError,
@@ -13,6 +14,8 @@ import {
   type SchemaIssue,
 } from '../errors/errors.js'
 import { EventEmitter } from '../events/emitter.js'
+import { applyInputGuardrails, applyOutputGuardrails } from '../guardrails/apply.js'
+import type { ApprovalDecision } from '../guardrails/types.js'
 import { toolCallsOf, textOf } from '../providers/provider.js'
 import type { ModelProvider, ModelRequest, ModelResponse } from '../providers/provider.js'
 import { validate } from '../schema/standard-schema.js'
@@ -20,11 +23,18 @@ import { defaultSessionStore } from '../sessions/memory.js'
 import type { SessionStore } from '../sessions/store.js'
 import { applySummary, summarizeMessages, type SummarizeOptions } from '../sessions/summarize.js'
 import { trimHistory, type ContextPolicy } from '../sessions/trim.js'
-import { executeToolCalls } from '../tools/execute.js'
+import { ApprovalPending, executeToolCalls, type ToolGate } from '../tools/execute.js'
 import { ToolRegistry } from '../tools/registry.js'
-import { assistantMessage, toolMessage, userMessage } from '../types/messages.js'
-import type { ModelMessage, ToolResultPart } from '../types/messages.js'
+import {
+  assistantMessage,
+  messageText,
+  toolMessage,
+  userMessage,
+  ZERO_USAGE,
+} from '../types/messages.js'
+import type { ModelMessage, ToolCallPart, ToolResultPart } from '../types/messages.js'
 import { createRunId } from '../util/id.js'
+import { safeStringify } from '../util/stringify.js'
 import { callModel } from './model-call.js'
 import {
   extractJson,
@@ -96,6 +106,17 @@ export interface RunInternals {
    * by it. Generating it one level up is the only way to have it that early.
    */
   readonly runId?: string
+
+  /**
+   * Messages a suspended run produced, grafted on before the loop starts.
+   *
+   * Only `Agent.resumeApproval` sets this, and only for a session-backed
+   * resume: the suspended run persisted nothing, so the store is missing the
+   * user turn and the assistant tool-call turn that the pending calls belong
+   * to. Without it the loaded history would not contain the calls being
+   * approved.
+   */
+  readonly replay?: readonly ModelMessage[]
 }
 
 /**
@@ -135,9 +156,23 @@ export async function executeRun<TOutput = string>(
 
   // Loading happens after `run.start` so that event is always first, and in its
   // own try because there is no `RunState` to report against yet.
+  //
+  // Input guardrails run in the same try, and after the load rather than before
+  // it: a guardrail that inspects the conversation needs the history, and a
+  // store read costs no tokens. Being inside this try is what gives a rejection
+  // its `run.error` event — nothing thrown above the main `try` below gets one.
   let history: readonly ModelMessage[]
+  let turnMessages: readonly ModelMessage[]
   try {
     history = await loadHistory(config, options, session, events, runId, signal)
+    turnMessages = await guardInput({
+      config,
+      events,
+      runId,
+      signal,
+      history,
+      input,
+    })
   } catch (cause) {
     const error = toAgentError(cause)
     events.emit({ type: 'run.error', runId, agentName: config.name, error, turn: 1 })
@@ -149,7 +184,7 @@ export async function executeRun<TOutput = string>(
     runId,
     agentName: config.name,
     modelId: config.model.modelId,
-    messages: [...history, ...normalizeInput(input)],
+    messages: [...history, ...(internals.replay ?? []), ...turnMessages],
   })
 
   const toolDefinitions = await registry.definitions()
@@ -177,6 +212,11 @@ export async function executeRun<TOutput = string>(
         events.emit({ type: 'text.delta', runId, agentName: config.name, turn, delta })
       }
 
+  // Hoisted for the same reason. `undefined` when the agent has no tool
+  // guardrails, which is what keeps `executeToolCalls` on exactly the path it
+  // took before this step existed.
+  const makeGate = buildGateFactory({ config, state, events, runId, signal })
+
   // Resolved once: these do not change between turns, and rebuilding them per
   // turn would be pure waste in the hottest part of the loop.
   const toolChoice = options.toolChoice ?? config.toolChoice
@@ -189,6 +229,21 @@ export async function executeRun<TOutput = string>(
   const retryPolicy = resolveRetryPolicy(config, options)
 
   try {
+    // Settles tool calls carried over from a suspended run, so the loop below
+    // starts against a complete conversation. A no-op unless `approvals` were
+    // passed. Inside the try so a re-suspension takes the same path as the
+    // original one.
+    await settleApprovals({
+      config,
+      state,
+      events,
+      runId,
+      signal,
+      registry,
+      makeGate,
+      approvals: options.approvals,
+    })
+
     let stopReason: StopReason = 'max_turns'
 
     while (state.turns < maxTurns) {
@@ -321,6 +376,7 @@ export async function executeRun<TOutput = string>(
         turn,
         defaultTimeoutMs: config.toolTimeoutMs ?? AGENT_DEFAULTS.toolTimeoutMs,
         signal,
+        ...(makeGate ? { gate: makeGate(turn) } : {}),
       })
 
       for (const outcome of outcomes) {
@@ -385,6 +441,21 @@ export async function executeRun<TOutput = string>(
         })
       : undefined
 
+    // Checked against the answer the caller is about to receive — the validated
+    // object when there is an `outputSchema`, the text otherwise.
+    //
+    // **This must stay above the session save too**, for the same reason
+    // `finalizeOutput` does: a rejected answer must not be persisted, and the
+    // ordering is the only thing enforcing that.
+    const guarded = await guardOutput({
+      config,
+      state,
+      events,
+      runId,
+      signal,
+      validated,
+    })
+
     // Only a completed run is persisted, and only the messages it produced.
     //
     // A run that threw mid-turn can leave an assistant message holding tool
@@ -405,7 +476,7 @@ export async function executeRun<TOutput = string>(
       })
     }
 
-    const result = buildResult<TOutput>(state, config, stopReason, system, validated)
+    const result = buildResult<TOutput>(state, config, stopReason, system, guarded)
 
     events.emit({
       type: 'run.finish',
@@ -420,7 +491,27 @@ export async function executeRun<TOutput = string>(
 
     return result
   } catch (cause) {
-    const error = toAgentError(cause)
+    // A suspension arrives here because `executeToolCalls` throws rather than
+    // returning: it is not an outcome for one call, it cancels the whole turn.
+    // Converting it here rather than at the throw site is what lets it carry the
+    // conversation, which only this scope has.
+    //
+    // It rides the normal error path on purpose. Nothing is persisted (the save
+    // is above), and "a run that does not return ends with `run.error`" stays
+    // true for every SSE consumer and for `resumable.ts`.
+    const error =
+      cause instanceof ApprovalPending
+        ? suspend({
+            cause,
+            config,
+            state,
+            events,
+            runId,
+            session,
+            system,
+            historyLength: history.length,
+          })
+        : toAgentError(cause)
 
     events.emit({
       type: 'run.error',
@@ -434,6 +525,376 @@ export async function executeRun<TOutput = string>(
   } finally {
     dispose()
   }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Guardrails                                                                */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Runs the input guardrails and returns this run's new messages.
+ *
+ * With no guardrails configured this is `normalizeInput(input)` and nothing
+ * else — the same value the constructor used to receive inline.
+ *
+ * A `replace` collapses the turn to a single user message. When the input
+ * arrived as a message array that loses its structure, which is documented and
+ * rare: rewriting is for scrubbing and clamping text, and a guardrail that needs
+ * finer control over a multi-message turn should reject and let the caller
+ * rebuild it.
+ */
+async function guardInput(args: {
+  config: AgentConfig<unknown>
+  events: EventEmitter
+  runId: string
+  signal: AbortSignal
+  history: readonly ModelMessage[]
+  input: AgentInput
+}): Promise<readonly ModelMessage[]> {
+  const { config, events, runId, signal, history, input } = args
+  const guardrails = config.inputGuardrails
+  const messages = normalizeInput(input)
+
+  if (!guardrails || guardrails.length === 0) return messages
+
+  const original = typeof input === 'string' ? input : messagesText(messages)
+
+  const guarded = await applyInputGuardrails({
+    guardrails,
+    input: original,
+    context: {
+      runId,
+      agentName: config.name,
+      turn: 1,
+      messages: [...history, ...messages],
+      signal,
+    },
+    reporter: { events, runId, agentName: config.name, turn: 1 },
+  })
+
+  return guarded === original ? messages : [userMessage(guarded)]
+}
+
+/**
+ * Builds the per-turn {@link ToolGate}, or `undefined` when there is nothing to
+ * gate.
+ *
+ * A factory rather than a value because the context carries the turn number and
+ * the conversation as it stands, both of which change every turn — but the
+ * guardrails and the emitter do not, so the closure is built once.
+ */
+function buildGateFactory(args: {
+  config: AgentConfig<unknown>
+  state: RunState
+  events: EventEmitter
+  runId: string
+  signal: AbortSignal
+}): ((turn: number) => ToolGate) | undefined {
+  const { config, state, events, runId, signal } = args
+  const guardrails = config.toolGuardrails
+  if (!guardrails || guardrails.length === 0) return undefined
+
+  return (turn: number) => ({
+    guardrails,
+    context: {
+      runId,
+      agentName: config.name,
+      turn,
+      messages: state.messages,
+      signal,
+    },
+    onTriggered: (event) => {
+      events.emit({
+        type: 'guardrail.triggered',
+        runId,
+        agentName: config.name,
+        turn,
+        stage: 'tool',
+        guardrail: event.guardrail,
+        action: event.action,
+        toolName: event.toolName,
+        toolCallId: event.toolCallId,
+        ...(event.reason !== undefined ? { reason: event.reason } : {}),
+      })
+    },
+  })
+}
+
+/**
+ * Settles tool calls that a suspended run left outstanding, before the loop
+ * starts.
+ *
+ * A resumed run is just "a run whose first turn's tools already happened", and
+ * this is what makes that true. The conversation handed back by a suspension
+ * ends with an assistant tool-call turn whose results never arrived — a shape
+ * every provider rejects — so it has to be completed before a model call can be
+ * made against it.
+ *
+ * The guardrails are **re-run**, not trusted. An `approved: true` decision can
+ * only satisfy a `requireApproval`; a guardrail that would reject the call
+ * outright still rejects it. And only this function reads `options.approvals` —
+ * the in-loop gate never does, which is what makes an approval authorise one
+ * call once rather than becoming standing permission for the rest of the run.
+ */
+async function settleApprovals(args: {
+  config: AgentConfig<unknown>
+  state: RunState
+  events: EventEmitter
+  runId: string
+  signal: AbortSignal
+  registry: ToolRegistry
+  makeGate: ((turn: number) => ToolGate) | undefined
+  approvals: readonly ApprovalDecision[] | undefined
+}): Promise<void> {
+  const { config, state, events, runId, signal, registry, makeGate, approvals } = args
+
+  const outstanding = outstandingToolCalls(state.messages)
+  if (outstanding.length === 0) return
+
+  const decisions = new Map((approvals ?? []).map((decision) => [decision.toolCallId, decision]))
+
+  // A decision naming a call that is not outstanding is a bug in the caller's
+  // plumbing, not a request to ignore. Silently dropping it would re-suspend
+  // with nothing to explain why.
+  const known = new Set(outstanding.map((call) => call.toolCallId))
+  for (const id of decisions.keys()) {
+    if (known.has(id)) continue
+    throw new ConfigurationError(`No pending tool call with id "${id}".`, {
+      hint:
+        `Outstanding ids for this suspension: ${[...known].join(', ') || '(none)'}. ` +
+        'Pass the ids from `suspension.pending.calls`, unmodified.',
+      details: { toolCallId: id, expected: [...known] },
+    })
+  }
+
+  const startedAt = Date.now()
+  const denied: ToolResultPart[] = []
+  const approvedIds = new Set<string>()
+
+  for (const call of outstanding) {
+    const decision = decisions.get(call.toolCallId)
+    if (!decision) continue
+
+    events.emit({
+      type: 'approval.resolved',
+      runId,
+      agentName: config.name,
+      turn: 0,
+      toolCallId: call.toolCallId,
+      toolName: call.toolName,
+      approved: decision.approved,
+      ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+    })
+
+    if (decision.approved) {
+      approvedIds.add(call.toolCallId)
+      continue
+    }
+
+    denied.push({
+      type: 'tool-result',
+      toolCallId: call.toolCallId,
+      toolName: call.toolName,
+      isError: true,
+      output: {
+        error: decision.reason ?? 'A human declined this action.',
+        code: 'approval_denied',
+      },
+    })
+  }
+
+  // Everything not explicitly denied goes through the ordinary path, guardrails
+  // included. Three things fall out of that for free:
+  //
+  //   • a call no guardrail ever gated just runs — it never needed a decision;
+  //   • an approval satisfies `requireApproval` but cannot bypass a `reject`,
+  //     because only the former is downgraded;
+  //   • a gated call with no decision makes `executeToolCalls` throw
+  //     `ApprovalPending` exactly as it did the first time, so the run
+  //     re-suspends naming precisely the calls still outstanding.
+  const deniedIds = new Set(denied.map((result) => result.toolCallId))
+  const attempt = outstanding.filter((call) => !deniedIds.has(call.toolCallId))
+
+  const outcomes =
+    attempt.length > 0
+      ? await executeToolCalls(attempt, {
+          registry,
+          runId,
+          agentName: config.name,
+          turn: 0,
+          defaultTimeoutMs: config.toolTimeoutMs ?? AGENT_DEFAULTS.toolTimeoutMs,
+          signal,
+          ...(makeGate ? { gate: approvedGate(makeGate(0), approvedIds) } : {}),
+        })
+      : []
+
+  for (const outcome of outcomes) {
+    events.emit({
+      type: 'tool.end',
+      runId,
+      agentName: config.name,
+      turn: 0,
+      toolName: outcome.result.toolName,
+      toolCallId: outcome.result.toolCallId,
+      result: outcome.result,
+      isError: outcome.result.isError === true,
+      durationMs: outcome.durationMs,
+    })
+  }
+
+  // Results are appended in the original call order, so the conversation matches
+  // the order the model asked in.
+  const byId = new Map(outcomes.map((outcome) => [outcome.result.toolCallId, outcome.result]))
+  const ordered = outstanding.map(
+    (call) => byId.get(call.toolCallId) ?? denied.find((r) => r.toolCallId === call.toolCallId),
+  )
+
+  state.append(toolMessage(ordered.filter((r): r is ToolResultPart => r !== undefined)))
+
+  state.completeResume({
+    turn: 0,
+    text: '',
+    toolCalls: outstanding,
+    toolResults: ordered.filter((r): r is ToolResultPart => r !== undefined),
+    finishReason: 'tool_calls',
+    usage: ZERO_USAGE,
+    durationMs: Date.now() - startedAt,
+    modelId: state.modelId,
+  })
+}
+
+/**
+ * A gate that honours the decisions a human already made.
+ *
+ * `requireApproval` is downgraded to `allow` **only for the ids in
+ * `approvedIds`** — otherwise a guardrail would ask for the same call again and
+ * the run would suspend forever. Every other verdict is left alone, which is
+ * what makes an approval unable to override an outright `reject`, and is the
+ * whole reason the guardrails are re-run rather than trusted.
+ */
+function approvedGate(gate: ToolGate, approvedIds: ReadonlySet<string>): ToolGate {
+  return {
+    ...gate,
+    guardrails: gate.guardrails.map((guardrail) => ({
+      ...guardrail,
+      check: async (subject, context) => {
+        const verdict = await guardrail.check(subject, context)
+        if ('requireApproval' in verdict && approvedIds.has(subject.toolCallId)) {
+          return { allow: true }
+        }
+        return verdict
+      },
+    })),
+  }
+}
+
+/**
+ * Tool calls on the trailing assistant message that have no matching result.
+ *
+ * This is how a resumed run finds what it is resuming: the shape is unambiguous
+ * because a conversation is only ever left this way by a suspension.
+ */
+function outstandingToolCalls(messages: readonly ModelMessage[]): readonly ToolCallPart[] {
+  const last = messages.at(-1)
+  if (last?.role !== 'assistant') return []
+
+  const calls = last.content.filter((part): part is ToolCallPart => part.type === 'tool-call')
+  return calls
+}
+
+/**
+ * Turns an internal {@link ApprovalPending} into the public error, capturing
+ * everything a resume will need.
+ *
+ * Emits `approval.required` on the way through, so a UI watching the event
+ * stream can render the prompt without waiting for the promise to reject.
+ */
+function suspend(args: {
+  cause: ApprovalPending
+  config: AgentConfig<unknown>
+  state: RunState
+  events: EventEmitter
+  runId: string
+  session: ResolvedSession | undefined
+  system: string | undefined
+  historyLength: number
+}): ApprovalRequiredError {
+  const { cause, config, state, events, runId, session, system, historyLength } = args
+  const turn = state.currentTurn
+
+  events.emit({
+    type: 'approval.required',
+    runId,
+    agentName: config.name,
+    turn,
+    calls: cause.calls,
+  })
+
+  // The system message is prepended for the same reason `buildResult` does it:
+  // handing `messages` back to `run()` must reproduce the same conversation.
+  const messages: ModelMessage[] = system
+    ? [{ role: 'system', content: system }, ...state.messages]
+    : [...state.messages]
+
+  return new ApprovalRequiredError({
+    runId,
+    agentName: config.name,
+    messages,
+    produced: state.messages.slice(historyLength),
+    ...(session ? { sessionId: session.sessionId } : {}),
+    pending: { turn, calls: cause.calls },
+  })
+}
+
+/** Flattens a multi-message turn so a text guardrail has something to inspect. */
+function messagesText(messages: readonly ModelMessage[]): string {
+  return messages.map((message) => messageText(message)).join('\n')
+}
+
+/**
+ * Runs the output guardrails against the answer, and applies any rewrite to the
+ * transcript as well as to the result.
+ *
+ * Returns the box `buildResult` consumes. With no `outputSchema` the subject is
+ * the raw text and a rewrite replaces it; with one, the subject is the validated
+ * object and a rewrite is re-serialized so `result.text` and `result.messages`
+ * stay consistent with `result.output`.
+ */
+async function guardOutput(args: {
+  config: AgentConfig<unknown>
+  state: RunState
+  events: EventEmitter
+  runId: string
+  signal: AbortSignal
+  validated: ValidatedOutput | undefined
+}): Promise<ValidatedOutput | undefined> {
+  const { config, state, events, runId, signal, validated } = args
+  const guardrails = config.outputGuardrails
+  if (!guardrails || guardrails.length === 0) return validated
+
+  const text = state.finalText()
+  const turn = state.turns
+
+  const { value, replaced } = await applyOutputGuardrails<unknown>({
+    // The runner only ever knows `unknown` here; it never inspects the value,
+    // it hands it to the caller's own guardrail and stores whatever comes back.
+    guardrails,
+    output: validated ? validated.value : text,
+    context: {
+      runId,
+      agentName: config.name,
+      turn,
+      messages: state.messages,
+      signal,
+      text,
+    },
+    reporter: { events, runId, agentName: config.name, turn },
+  })
+
+  if (!replaced) return validated
+
+  state.replaceFinalText(validated ? safeStringify(value) : String(value))
+  return { value }
 }
 
 /* ------------------------------------------------------------------------- */

@@ -1,4 +1,4 @@
-import { addUsage, ZERO_USAGE } from '../types/messages.js'
+import { addUsage, textPart, ZERO_USAGE } from '../types/messages.js'
 import type { ModelMessage, Usage } from '../types/messages.js'
 import type { RunStep } from './result.js'
 
@@ -103,6 +103,50 @@ export class RunState {
     this.stepLog.push({ ...step, kind: 'repair' })
     this.usageTotal = addUsage(this.usageTotal, step.usage)
     this.lastModelId = step.modelId
+  }
+
+  /**
+   * Records tool calls carried over from a suspended run and executed before
+   * this run's first turn.
+   *
+   * Neither a turn nor a model call: `usage` is untouched because nothing was
+   * generated, and `turnCount` is untouched because the calls belong to a turn
+   * that happened in the run that suspended. See {@link RunStep.kind}.
+   */
+  completeResume(step: Omit<RunStep, 'kind'>): void {
+    this.stepLog.push({ ...step, kind: 'resume' })
+  }
+
+  /**
+   * Rewrites the run's final answer in place.
+   *
+   * The **one** place the log is edited rather than appended to, and it earns
+   * the exception: an output guardrail that scrubs PII has to scrub it from
+   * `messages` too. Otherwise the session stores the original, hands it back on
+   * the next turn, and `result.output` and `result.messages` disagree about what
+   * the agent said.
+   *
+   * The matching step's `text` is updated with it, so `steps` and `messages`
+   * cannot drift.
+   */
+  replaceFinalText(text: string): void {
+    for (let i = this.messageLog.length - 1; i >= 0; i -= 1) {
+      const message = this.messageLog[i]
+      if (message?.role !== 'assistant') continue
+
+      const hasText = message.content.some((part) => part.type === 'text')
+      if (!hasText) continue
+
+      // Non-text parts are preserved: an assistant turn can carry tool calls
+      // alongside its text, and dropping them would break the conversation.
+      const rewritten = message.content.filter((part) => part.type !== 'text')
+      this.messageLog[i] = { ...message, content: [textPart(text), ...rewritten] }
+
+      const stepIndex = this.stepLog.findLastIndex((step) => step.text.length > 0)
+      const step = this.stepLog[stepIndex]
+      if (step) this.stepLog[stepIndex] = { ...step, text }
+      return
+    }
   }
 
   /**

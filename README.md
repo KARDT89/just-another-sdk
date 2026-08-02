@@ -115,8 +115,8 @@ pnpm --filter just-another-sdk test:coverage
 
 ## Roadmap
 
-Guardrails and approval gates · multi-agent handoffs · built-in tool pack ·
-native Anthropic and Gemini providers.
+Multi-agent handoffs · built-in tool pack · native Anthropic and Gemini
+providers.
 
 Each is designed and documented under **Coming next** in the docs, so the intended
 API is visible before it ships.

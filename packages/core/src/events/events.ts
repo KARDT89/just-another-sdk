@@ -1,6 +1,7 @@
 import type { FinishReason, ToolDefinition } from '../providers/provider.js'
 import type { StopReason } from '../run/result.js'
 import type { AgentError, SchemaIssue } from '../errors/errors.js'
+import type { PendingToolCall } from '../guardrails/types.js'
 import type { ToolCallPart, ToolResultPart, Usage } from '../types/messages.js'
 
 /**
@@ -216,6 +217,53 @@ export interface OutputInvalidEvent extends EventBase {
   readonly repairing: boolean
 }
 
+/**
+ * A guardrail did something other than wave a value through.
+ *
+ * `guardrail` is why guardrails carry a name at all — the brief requires a
+ * triggered guardrail to be identifiable in a trace, and an index would not be.
+ *
+ * The value being judged is deliberately absent, for the same reason
+ * {@link OutputInvalidEvent} omits the raw text: events cross an SSE boundary to
+ * browsers, and a rejected input is unbounded and often user-supplied.
+ */
+export interface GuardrailTriggeredEvent extends EventBase {
+  readonly type: 'guardrail.triggered'
+  readonly guardrail: string
+  readonly stage: 'input' | 'output' | 'tool'
+  readonly action: 'reject' | 'replace' | 'require_approval'
+  /** Present only for a tool guardrail. */
+  readonly toolName?: string
+  readonly toolCallId?: string
+  /** The rejection message, or the approval reason. Absent for a replace. */
+  readonly reason?: string
+  /** 1-based. `1` for an input guardrail, which runs before turn 1. */
+  readonly turn: number
+}
+
+/**
+ * The run is suspending to wait on a human. Emitted before `run.error`.
+ *
+ * Unlike most events this *does* carry the tool arguments, because an approval
+ * UI cannot render "approve this refund?" without them. `tool.start` already
+ * ships `input` over SSE, and every payload is redacted on the way out.
+ */
+export interface ApprovalRequiredEvent extends EventBase {
+  readonly type: 'approval.required'
+  readonly turn: number
+  readonly calls: readonly PendingToolCall[]
+}
+
+/** A human's decision was applied while resuming. */
+export interface ApprovalResolvedEvent extends EventBase {
+  readonly type: 'approval.resolved'
+  readonly turn: number
+  readonly toolCallId: string
+  readonly toolName: string
+  readonly approved: boolean
+  readonly reason?: string
+}
+
 /** The run finished. Always the last event on a successful run. */
 export interface RunFinishEvent extends EventBase {
   readonly type: 'run.finish'
@@ -245,6 +293,9 @@ export type AgentEvent =
   | ModelFallbackEvent
   | ToolStartEvent
   | ToolEndEvent
+  | GuardrailTriggeredEvent
+  | ApprovalRequiredEvent
+  | ApprovalResolvedEvent
   | OutputInvalidEvent
   | RunFinishEvent
   | RunErrorEvent

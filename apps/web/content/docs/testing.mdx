@@ -278,6 +278,40 @@ it('repairs an answer that failed the schema', async () => {
 Drop `maxOutputRetries: 0` in to assert the failure instead — it rejects with an
 `InvalidOutputError` carrying `issues` and `rawText`.
 
+### Guardrails and approval
+
+The two assertions worth writing: a rejected input costs nothing, and a blocked
+tool call leaves the run recoverable.
+
+```ts
+it('rejects before spending a token', async () => {
+  const model = mockProvider([{ text: 'never reached' }])
+  const agent = new Agent({
+    name: 'test',
+    model,
+    inputGuardrails: [{ name: 'too-long', check: () => ({ reject: 'Nope.' }) }],
+  })
+
+  await expect(agent.run('hi')).rejects.toThrow(GuardrailError)
+  expect(model.calls).toHaveLength(0) // the receipt
+})
+
+it('suspends and resumes', async () => {
+  const error = (await agent
+    .run('refund 500')
+    .catch((e) => e)) as ApprovalRequiredError
+
+  const final = await agent.resumeApproval(error.suspension, [
+    {
+      toolCallId: error.suspension.pending.calls[0].toolCallId,
+      approved: true,
+    },
+  ])
+
+  expect(final.steps.map((s) => s.kind)).toEqual(['resume', 'turn'])
+})
+```
+
 ## Testing a provider
 
 Providers accept an injected `fetch`, so you can exercise the real translation

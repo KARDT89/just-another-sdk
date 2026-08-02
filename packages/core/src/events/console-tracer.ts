@@ -110,6 +110,31 @@ export function consoleTracer(options: ConsoleTracerOptions = {}): EventListener
         )
         break
 
+      case 'guardrail.triggered': {
+        const where = event.toolName ? ` ${paint('yellow', event.toolName)}` : ''
+        const why = event.reason ? paint('dim', ` · ${truncate(event.reason, maxLength)}`) : ''
+
+        if (event.action === 'replace') {
+          write(
+            `  ${paint('dim', '✎')} guardrail ${event.guardrail} ${paint('dim', `· replaced ${event.stage}`)}`,
+          )
+          break
+        }
+
+        const mark = event.action === 'reject' ? paint('red', '⊘') : paint('yellow', '⏸')
+        const verb = event.action === 'reject' ? 'blocked' : 'needs approval for'
+        write(`  ${mark} guardrail ${event.guardrail} ${paint('dim', `· ${verb}`)}${where}${why}`)
+        break
+      }
+
+      case 'approval.resolved': {
+        const mark = event.approved ? paint('green', '✔') : paint('red', '✗')
+        const verb = event.approved ? 'approved' : 'denied'
+        const why = event.reason ? paint('dim', ` · ${truncate(event.reason, maxLength)}`) : ''
+        write(`  ${mark} ${verb} ${paint('yellow', event.toolName)}${why}`)
+        break
+      }
+
       case 'output.invalid': {
         const count = `${event.issues.length} issue${event.issues.length === 1 ? '' : 's'}`
         const next = event.repairing
@@ -126,11 +151,20 @@ export function consoleTracer(options: ConsoleTracerOptions = {}): EventListener
         break
 
       case 'run.error':
+        // A suspension arrives on this path — it is how the run stops — but it
+        // is a designed pause, not a failure. Painting it red would train people
+        // to read a working approval flow as broken.
+        if (event.error.code === 'approval_required') {
+          write(`${paint('yellow', '⏸')} ${paint('dim', firstLine(event.error.message))}`)
+          break
+        }
         write(`${paint('red', '✗')} ${event.error.code}: ${event.error.message.split('\n')[0]}`)
         break
 
-      // text.delta and model.request are intentionally silent: one is per-token
-      // noise, the other duplicates model.response.
+      // text.delta, model.request, and approval.required are intentionally
+      // silent: the first is per-token noise, the second duplicates
+      // model.response, and the third is already covered by the
+      // guardrail.triggered line that caused it plus the run.error summary.
       default:
         break
     }
@@ -141,6 +175,10 @@ function format(value: unknown, maxLength: number): string {
   // Redact first, then stringify: a tool that handles credentials must not leak
   // them into a terminal or a CI log.
   return truncate(safeStringify(redact(value)), maxLength)
+}
+
+function firstLine(text: string): string {
+  return text.split('\n')[0] ?? text
 }
 
 function truncate(text: string, maxLength: number): string {

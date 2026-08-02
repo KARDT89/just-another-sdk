@@ -2,7 +2,7 @@
   "name": "just-another-sdk-monorepo",
   "version": "0.0.0",
   "private": true,
-  "description": "Monorepo for just-another-sdk \u2014 a TypeScript agent SDK with zero runtime dependencies.",
+  "description": "Monorepo for just-another-sdk — a TypeScript agent SDK with zero runtime dependencies.",
   "license": "MIT",
   "packageManager": "pnpm@11.15.1",
   "engines": {
@@ -28,6 +28,7 @@
     "example:server": "pnpm --filter example-chat-server start",
     "example:resumable": "pnpm --filter example-resumable start",
     "example:structured": "pnpm --filter example-structured start",
+    "example:guardrails": "pnpm --filter example-guardrails start",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "turbo run build --filter=just-another-sdk && changeset publish"

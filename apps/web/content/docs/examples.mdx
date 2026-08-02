@@ -3,9 +3,10 @@ title: Examples
 description: Runnable projects in the repository.
 ---
 
-All six examples live in the
+All eight examples live in the
 [repository](https://github.com/KARDT89/just-another-sdk/tree/main/examples) and run
-against a real model. Clone it, add a key, and go:
+against a real model — except the last, which is entirely offline. Clone it,
+add a key, and go:
 
 ```bash
 git clone https://github.com/KARDT89/just-another-sdk.git
@@ -279,6 +280,37 @@ trust.
 That last line is the design in one place: a repair is billed and traced, but it
 is not a turn, so `maxTurns` stays the ceiling it claims to be. See
 [Structured output](/docs/structured-output).
+
+## 8 — Guardrails and approval
+
+```bash
+pnpm example:guardrails
+```
+
+**Runs entirely offline** — the only example that needs no key at all. Four acts:
+
+- An input guardrail rejects a 20,000-character paste, and prints
+  `model calls made: 0`. "Rejected before spending a token" is a claim; that line
+  is the receipt.
+- An output guardrail scrubs an email address from the answer **and** from the
+  transcript, so the session cannot hand the original back next turn.
+- A tool guardrail blocks `delete_account`. The run still finishes — and the same
+  script is replayed under `onToolError: 'throw'` to show it finishes there too.
+- A $500 refund suspends for a human. The suspension is `JSON.stringify`'d and
+  re-parsed to stand in for a network hop, then resumed — once approved, once
+  declined.
+
+```text
+  ⊘ guardrail read-only-mode · blocked delete_account · This assistant is in read-only mode.
+✔ finish · 2 turns
+
+  ⏸ guardrail refund-cap · needs approval for refund_order · $500 is over the $100 limit.
+⏸ Waiting on approval for 1 tool call: refund_order.
+  ✔ approved refund_order
+✔ finish · 1 turn
+```
+
+See [Guardrails](/docs/guardrails).
 
 ## Patterns worth copying
 

@@ -5,6 +5,12 @@ import type { AgentEvent } from '../events/events.js'
 import type { SessionStore } from '../sessions/store.js'
 import type { StreamStore } from '../streams/store.js'
 import type { ContextPolicy } from '../sessions/trim.js'
+import type {
+  AnyToolGuardrail,
+  ApprovalDecision,
+  InputGuardrail,
+  OutputGuardrail,
+} from '../guardrails/types.js'
 import type { StandardSchemaV1 } from '../schema/standard-schema.js'
 import type { ObjectJsonSchema } from '../types/json-schema.js'
 import type { ModelMessage } from '../types/messages.js'
@@ -175,6 +181,52 @@ export interface AgentConfig<TOutput = string> {
    */
   readonly maxOutputRetries?: number
 
+  /**
+   * Checked before a single token is spent. Each can allow, rewrite, or reject.
+   *
+   * ```ts
+   * inputGuardrails: [{
+   *   name: 'max-length',
+   *   check: (input) =>
+   *     input.length > 10_000 ? { reject: 'Message too long.' } : { allow: true },
+   * }]
+   * ```
+   *
+   * Run in declaration order, one at a time — a rewrite must be visible to the
+   * next guardrail. The first rejection wins and throws a `GuardrailError`.
+   */
+  readonly inputGuardrails?: readonly InputGuardrail[]
+
+  /**
+   * Checked against the final answer, before it reaches you or the session.
+   *
+   * Typed on `TOutput`, so with an `outputSchema` a guardrail receives the
+   * validated object rather than raw text — and a rewrite cannot break the
+   * schema contract. `context.text` still carries the raw JSON.
+   *
+   * A rewrite also updates the transcript, so a scrubbed answer stays scrubbed
+   * in the session rather than coming back on the next turn.
+   */
+  readonly outputGuardrails?: readonly OutputGuardrail<TOutput>[]
+
+  /**
+   * Checked for each tool call, after its arguments validate and before the
+   * handler runs.
+   *
+   * ```ts
+   * toolGuardrails: [
+   *   { name: 'refund-cap', tools: ['refund_order'],
+   *     check: ({ input }) => input.amount > 100 ? { requireApproval: true } : { allow: true } },
+   *   { name: 'confirm-writes', check: ({ toolName }) => … },  // every tool
+   * ]
+   * ```
+   *
+   * A rejection is **not** a run failure: the model receives an error result and
+   * routes around it, even under `onToolError: 'throw'`. A `requireApproval`
+   * suspends the run before *any* tool in that turn executes.
+   */
+  readonly toolGuardrails?: readonly AnyToolGuardrail[]
+
   /** Free-form tags passed to providers that support them, and to traces. */
   readonly metadata?: Readonly<Record<string, string>>
 }
@@ -229,6 +281,16 @@ export interface RunOptions {
    * `agent.clone({ outputSchema })` for a per-request schema — it infers.
    */
   readonly maxOutputRetries?: number
+
+  /**
+   * Human decisions about tool calls a guardrail suspended the run for.
+   *
+   * You rarely pass this directly — {@link Agent.resumeApproval} is the
+   * ergonomic form. Only the resume prologue reads it, never the loop, which is
+   * what makes an approval authorise one call once rather than becoming standing
+   * permission for the rest of the run.
+   */
+  readonly approvals?: readonly ApprovalDecision[]
 
   /**
    * Observe the run as it happens. Synchronous and fire-and-forget: a throwing

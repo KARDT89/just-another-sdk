@@ -12,7 +12,7 @@ change in a patch release.
 
 | Export            | Kind     | Description                                                                                                                                                                      |
 | ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Agent`           | class    | `new Agent(config)`, `.run()`, `.stream()`, `.session()`, `.resumable()`, `.resume()`, `.clone()`, `.withTools()`                                                                |
+| `Agent`           | class    | `new Agent(config)`, `.run()`, `.stream()`, `.session()`, `.resumable()`, `.resume()`, `.resumeApproval()`, `.clone()`, `.withTools()`                                           |
 | `AgentSession`    | type     | What `.session(id)` returns: `run`, `stream`, `messages()`, `pop()`, `clear()`, `store`                                                                                          |
 | `run`             | function | `run(config, input, options)` — shorthand for a one-shot agent                                                                                                                   |
 | `runAgent`        | function | The loop itself, if you want it without the `Agent` wrapper                                                                                                                      |
@@ -35,12 +35,12 @@ change in a patch release.
 
 ### Results
 
-| Export       | Kind     | Description                                                                 |
-| ------------ | -------- | --------------------------------------------------------------------------- |
-| `RunResult`  | type     | What `run()` resolves with                                                  |
-| `RunStep`    | type     | One model call: `kind`, text, tool calls, results, usage, timing, `modelId` |
-| `StopReason` | type     | `'finish' \| 'max_turns'`                                                   |
-| `isComplete` | function | `result.stopReason === 'finish'`                                            |
+| Export       | Kind     | Description                                                                                 |
+| ------------ | -------- | ------------------------------------------------------------------------------------------- |
+| `RunResult`  | type     | What `run()` resolves with                                                                  |
+| `RunStep`    | type     | One model call: `kind` (`turn`/`repair`/`resume`), text, tool calls, results, usage, timing |
+| `StopReason` | type     | `'finish' \| 'max_turns'`                                                                   |
+| `isComplete` | function | `result.stopReason === 'finish'`                                                            |
 
 ### Streaming
 
@@ -116,30 +116,35 @@ See [Errors → Retries](/docs/errors#retries).
 | `ModelRetryEvent`                 | type     | `attempt`, `maxAttempts`, `delayMs`, `discardedText`     |
 | `ModelFallbackEvent`              | type     | `fromModelId`, `toModelId`, `index`, `error`             |
 | `OutputInvalidEvent`              | type     | `attempt`, `maxAttempts`, `issues`, `repairing`          |
+| `GuardrailTriggeredEvent`         | type     | `guardrail`, `stage`, `action`, `toolName?`, `reason?`   |
+| `ApprovalRequiredEvent`           | type     | `turn`, `calls`                                          |
+| `ApprovalResolvedEvent`           | type     | `toolCallId`, `toolName`, `approved`, `reason?`          |
 | `SessionLoadEvent`                | type     | `sessionId`, `messageCount`, `droppedCount`, `truncated` |
 | `SessionSummarizeEvent`           | type     | `coveredCount`, `foldedCount`, `keptCount`, `error?`     |
 | `SessionSaveEvent`                | type     | `sessionId`, `appendedCount`                             |
 
 ### Errors
 
-| Export                          | Code                                                       |
-| ------------------------------- | ---------------------------------------------------------- |
-| `AgentError`                    | base class for all of the below                            |
-| `ConfigurationError`            | `configuration_error`                                      |
-| `AuthenticationError`           | `authentication_error`                                     |
-| `RateLimitError`                | `rate_limit_error` — carries `retryAfterMs`                |
-| `ProviderError`                 | `provider_error` — carries `status`                        |
-| `NetworkError`                  | `network_error`                                            |
-| `TimeoutError`                  | `timeout_error`                                            |
-| `AbortError`                    | `aborted`                                                  |
-| `InvalidToolInputError`         | `invalid_tool_input` — carries `issues`                    |
-| `ToolExecutionError`            | `tool_execution_error`                                     |
-| `ToolNotFoundError`             | `tool_not_found`                                           |
-| `InvalidSchemaError`            | `invalid_schema`                                           |
-| `InvalidOutputError`            | `invalid_output` — carries `issues`, `rawText`, `attempts` |
-| `isAgentError`                  | narrowing helper                                           |
-| `toAgentError`                  | wraps any thrown value as an `AgentError`                  |
-| `AgentErrorCode`, `SchemaIssue` | types                                                      |
+| Export                          | Code                                                          |
+| ------------------------------- | ------------------------------------------------------------- |
+| `AgentError`                    | base class for all of the below                               |
+| `ConfigurationError`            | `configuration_error`                                         |
+| `AuthenticationError`           | `authentication_error`                                        |
+| `RateLimitError`                | `rate_limit_error` — carries `retryAfterMs`                   |
+| `ProviderError`                 | `provider_error` — carries `status`                           |
+| `NetworkError`                  | `network_error`                                               |
+| `TimeoutError`                  | `timeout_error`                                               |
+| `AbortError`                    | `aborted`                                                     |
+| `InvalidToolInputError`         | `invalid_tool_input` — carries `issues`                       |
+| `ToolExecutionError`            | `tool_execution_error`                                        |
+| `ToolNotFoundError`             | `tool_not_found`                                              |
+| `InvalidSchemaError`            | `invalid_schema`                                              |
+| `InvalidOutputError`            | `invalid_output` — carries `issues`, `rawText`, `attempts`    |
+| `GuardrailError`                | `guardrail_blocked` — carries `guardrail`, `stage`, `subject` |
+| `ApprovalRequiredError`         | `approval_required` — carries `suspension`                    |
+| `isAgentError`                  | narrowing helper                                              |
+| `toAgentError`                  | wraps any thrown value as an `AgentError`                     |
+| `AgentErrorCode`, `SchemaIssue` | types                                                         |
 
 ### Messages
 
@@ -164,6 +169,17 @@ See [Errors → Retries](/docs/errors#retries).
 | `isStandardSchema`                                          | function | Runtime guard                                      |
 | `StandardSchemaV1`, `InferSchemaOutput`, `ValidationResult` | type     |                                                    |
 | `JsonSchema`, `ObjectJsonSchema`                            | type     |                                                    |
+
+### Guardrails
+
+| Export                                                                                 | Kind | Description                                          |
+| -------------------------------------------------------------------------------------- | ---- | ---------------------------------------------------- |
+| `InputGuardrail`, `OutputGuardrail<T>`, `ToolGuardrail<T>`, `AnyToolGuardrail`         | type | The three kinds — see [Guardrails](/docs/guardrails) |
+| `GuardrailVerdict<T>`, `ToolGuardrailVerdict`                                          | type | `allow` · `replace` · `reject` · `requireApproval`   |
+| `GuardrailAllow`, `GuardrailRewrite<T>`, `GuardrailReject`, `GuardrailRequireApproval` | type | The individual verdict shapes                        |
+| `GuardrailContext`, `OutputGuardrailContext`, `ToolGuardrailSubject<T>`                | type | What a `check` receives                              |
+| `ApprovalSuspension`, `PendingApproval`, `PendingToolCall`                             | type | A suspended run, as plain JSON                       |
+| `ApprovalDecision`                                                                     | type | `{ toolCallId, approved, reason? }`                  |
 
 ### Provider contract
 

@@ -15,6 +15,7 @@
     "example-sessions",
     "example-chat-server",
     "example-resumable",
-    "example-structured"
+    "example-structured",
+    "example-guardrails"
   ]
 }

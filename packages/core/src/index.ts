@@ -50,6 +50,33 @@ export type { ContextPolicy } from './sessions/trim.js'
 export { isSummaryMessage } from './sessions/summarize.js'
 export type { SummarizeOptions } from './sessions/summarize.js'
 
+/* ── Guardrails ──────────────────────────────────────────────────────────── */
+
+/**
+ * Policy around a run: reject or rewrite the input, gate a tool call, check the
+ * final answer, or pause for a human. Types only — a guardrail is a plain object
+ * you write, so there is nothing to construct.
+ */
+export type {
+  AnyToolGuardrail,
+  ApprovalDecision,
+  ApprovalSuspension,
+  GuardrailAllow,
+  GuardrailContext,
+  GuardrailReject,
+  GuardrailRequireApproval,
+  GuardrailRewrite,
+  GuardrailVerdict,
+  InputGuardrail,
+  OutputGuardrail,
+  OutputGuardrailContext,
+  PendingApproval,
+  PendingToolCall,
+  ToolGuardrail,
+  ToolGuardrailSubject,
+  ToolGuardrailVerdict,
+} from './guardrails/types.js'
+
 /* ── Tools ───────────────────────────────────────────────────────────────── */
 
 export { tool } from './tools/tool.js'
@@ -106,8 +133,11 @@ export { EventEmitter } from './events/emitter.js'
 export type {
   AgentEvent,
   AgentEventType,
+  ApprovalRequiredEvent,
+  ApprovalResolvedEvent,
   EventListener,
   EventOfType,
+  GuardrailTriggeredEvent,
   ModelFallbackEvent,
   ModelRequestEvent,
   ModelResponseEvent,
@@ -129,8 +159,10 @@ export type {
 export {
   AbortError,
   AgentError,
+  ApprovalRequiredError,
   AuthenticationError,
   ConfigurationError,
+  GuardrailError,
   InvalidOutputError,
   InvalidSchemaError,
   InvalidToolInputError,

@@ -1,6 +1,7 @@
 import { ConfigurationError } from '../errors/errors.js'
+import type { ApprovalDecision, ApprovalSuspension } from '../guardrails/types.js'
 import type { RunResult } from '../run/result.js'
-import { runAgent } from '../run/runner.js'
+import { executeRun, runAgent } from '../run/runner.js'
 import { streamAgent, type StreamedRun } from '../run/stream.js'
 
 import { defaultSessionStore } from '../sessions/memory.js'
@@ -80,6 +81,26 @@ export class Agent<TOutput = string> {
     // Constructing the registry here surfaces duplicate tool names immediately,
     // at the point the developer wrote the mistake, rather than on first run.
     this.registry = new ToolRegistry(config.tools)
+
+    // A tool guardrail naming a tool that does not exist would simply never
+    // fire — a typo in a security control that fails *open* and is invisible
+    // until the thing it was meant to stop happens. Reject it here instead.
+    const registered = new Set(this.registry.names())
+    for (const guardrail of config.toolGuardrails ?? []) {
+      for (const name of guardrail.tools ?? []) {
+        if (registered.has(name)) continue
+        throw new ConfigurationError(
+          `Tool guardrail "${guardrail.name}" targets an unregistered tool "${name}".`,
+          {
+            hint:
+              registered.size > 0
+                ? `Tools on this agent: ${[...registered].join(', ')}.`
+                : 'This agent has no tools registered. Pass `tools` to the Agent constructor.',
+            details: { guardrail: guardrail.name, toolName: name },
+          },
+        )
+      }
+    }
     this.config = config
     this.name = config.name
   }
@@ -238,6 +259,51 @@ export class Agent<TOutput = string> {
    */
   resume(streamId: string, options: FollowOptions = {}): ReturnType<typeof resumeStream> {
     return resumeStream(this.streamStore(), streamId, options)
+  }
+
+  /**
+   * Finishes a run that a tool guardrail suspended for human approval.
+   *
+   * ```ts
+   * try {
+   *   const result = await agent.run('Refund order 1234')
+   * } catch (error) {
+   *   if (!(error instanceof ApprovalRequiredError)) throw error
+   *
+   *   const decisions = error.suspension.pending.calls.map((call) => ({
+   *     toolCallId: call.toolCallId,
+   *     approved: await askHuman(call),
+   *   }))
+   *
+   *   const final = await agent.resumeApproval(error.suspension, decisions)
+   * }
+   * ```
+   *
+   * The suspension is plain JSON, so the decision can be made in another
+   * process, another machine, or an hour later. Approved calls run, denied ones
+   * become a refusal the model reads and explains, and the run continues from
+   * there.
+   *
+   * Deliberately **not** called `resume` — {@link Agent.resume} re-attaches a
+   * reader to a recorded event stream, which is a different thing entirely.
+   */
+  async resumeApproval<T = TOutput>(
+    suspension: ApprovalSuspension,
+    decisions: readonly ApprovalDecision[],
+    options: RunOptions = {},
+  ): Promise<RunResult<T>> {
+    // A session-backed resume replays only what the suspended run produced: the
+    // store never saw it, because a suspended run persists nothing. Without a
+    // session the whole conversation comes back as `messages` instead.
+    // `resolveSession` rejects both together, so this is a choice, not a merge.
+    const continuation: RunOptions = suspension.sessionId
+      ? { ...options, sessionId: suspension.sessionId, approvals: decisions }
+      : { ...options, messages: suspension.messages, approvals: decisions }
+
+    return executeRun<T>(this.config, [], continuation, {
+      streaming: false,
+      ...(suspension.sessionId ? { replay: suspension.produced } : {}),
+    })
   }
 
   /** Configured stream store, or this agent's own in-memory one. */

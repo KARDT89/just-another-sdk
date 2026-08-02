@@ -76,6 +76,21 @@ export async function POST(request: Request) {
       description:
         'Repair attempts after a final answer fails outputSchema. Additive to maxRetries, never multiplicative.',
     },
+    inputGuardrails: {
+      type: 'InputGuardrail[]',
+      description:
+        'Checked before the first model call. Allow, rewrite, or reject. See Guardrails.',
+    },
+    outputGuardrails: {
+      type: 'OutputGuardrail<TOutput>[]',
+      description:
+        'Checked against the final answer, before it reaches you or the session.',
+    },
+    toolGuardrails: {
+      type: 'ToolGuardrail[]',
+      description:
+        'Checked per tool call after arguments validate. Can also require human approval.',
+    },
     maxTurns: {
       type: 'number',
       default: '10',

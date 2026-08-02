@@ -298,8 +298,8 @@ optional but the whole thing is designed around it.
 
 ## Roadmap
 
-Guardrails and approval gates · multi-agent handoffs · built-in tool pack ·
-native Anthropic and Gemini providers.
+Multi-agent handoffs · built-in tool pack · native Anthropic and Gemini
+providers.
 
 ## License
 

@@ -40,6 +40,9 @@ This distinction is the most important thing on this page.
 | The run is cancelled or times out                  | Throws                                                                        |
 | A tool fails under `onToolError: 'throw'`          | Throws                                                                        |
 | `outputSchema` unsatisfied after repairs           | Throws `InvalidOutputError`, with the per-field issues                        |
+| A tool guardrail blocks a call                     | **Does not throw.** The model gets an error result and routes around it       |
+| An input or output guardrail rejects               | Throws `GuardrailError`, naming the guardrail                                 |
+| A tool guardrail requires approval                 | Throws `ApprovalRequiredError`, carrying a resumable suspension               |
 | Misconfiguration                                   | Throws, at construction time                                                  |
 
 A `RunResult` in hand therefore always means the agent produced something.
@@ -99,6 +102,16 @@ A `RunResult` in hand therefore always means the agent produced something.
       type: 'not retryable',
       description:
         'The final answer failed outputSchema and the repair budget was spent. Carries issues and rawText.',
+    },
+    guardrail_blocked: {
+      type: 'not retryable',
+      description:
+        'An input or output guardrail rejected the run. Carries guardrail and stage.',
+    },
+    approval_required: {
+      type: 'not retryable',
+      description:
+        'A tool guardrail asked for a human. Not a failure — carries a resumable suspension.',
     },
   }}
 />

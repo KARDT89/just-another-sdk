@@ -8,6 +8,8 @@
  *      Anything that formats request details must run through `util/redact.ts`.
  */
 
+import type { ApprovalSuspension } from '../guardrails/types.js'
+
 export type AgentErrorCode =
   | 'configuration_error'
   | 'authentication_error'
@@ -21,6 +23,8 @@ export type AgentErrorCode =
   | 'tool_not_found'
   | 'invalid_schema'
   | 'invalid_output'
+  | 'guardrail_blocked'
+  | 'approval_required'
 
 export interface AgentErrorOptions {
   /** Machine-readable discriminator. */
@@ -240,6 +244,91 @@ export class InvalidOutputError extends AgentError {
     this.issues = issues
     this.rawText = rawText
     this.attempts = attempts
+  }
+}
+
+/**
+ * A guardrail rejected the run's input or its final answer.
+ *
+ * A *controlled* failure, not a crash: `retryable` is false, the message is the
+ * guardrail's own words, and `guardrail` names which one fired so a trace points
+ * at the policy rather than at the runtime.
+ *
+ * Tool guardrails do **not** raise this. A blocked tool call becomes a tool
+ * result the model reads and routes around, because aborting a whole run over
+ * one refused call throws away work the user already paid for. See
+ * `ToolCallOutcome.blockedBy`.
+ */
+export class GuardrailError extends AgentError {
+  readonly guardrail: string
+  readonly stage: 'input' | 'output'
+
+  /**
+   * What the guardrail was looking at.
+   *
+   * Deliberately not in `details`, and so absent from `toJSON()` — the same rule
+   * as {@link InvalidOutputError.rawText}. A rejected input is unbounded and is
+   * very often whatever the user just pasted in.
+   */
+  readonly subject: unknown
+
+  constructor(
+    args: {
+      guardrail: string
+      stage: 'input' | 'output'
+      reason: string
+      subject: unknown
+    },
+    options: Omit<AgentErrorOptions, 'code'> = {},
+  ) {
+    super(`Guardrail "${args.guardrail}" blocked this run's ${args.stage}: ${args.reason}`, {
+      ...options,
+      code: 'guardrail_blocked',
+      retryable: false,
+      details: { ...options.details, guardrail: args.guardrail, stage: args.stage },
+    })
+    this.guardrail = args.guardrail
+    this.stage = args.stage
+    this.subject = args.subject
+  }
+}
+
+/**
+ * A tool guardrail asked for a human, and the run suspended before executing
+ * anything.
+ *
+ * Not a failure — a designed pause. It throws rather than returning because a
+ * suspended run has no output, and `RunResult<Ticket>` whose `output` is not a
+ * `Ticket` is the exact lie {@link InvalidOutputError} exists to prevent.
+ * Throwing also means `stream()`, `session().run()`, and `resumable()` all
+ * support approval with no change to their types.
+ *
+ * `suspension` is plain JSON. Keep it server-side — it holds the conversation —
+ * and send whoever decides only `suspension.pending`.
+ */
+export class ApprovalRequiredError extends AgentError {
+  readonly suspension: ApprovalSuspension
+
+  constructor(suspension: ApprovalSuspension, options: Omit<AgentErrorOptions, 'code'> = {}) {
+    const names = suspension.pending.calls.map((call) => call.toolName)
+    super(
+      `Waiting on approval for ${names.length} tool call${names.length === 1 ? '' : 's'}: ` +
+        `${names.join(', ')}.`,
+      {
+        ...options,
+        code: 'approval_required',
+        retryable: false,
+        hint:
+          options.hint ??
+          'Decide on `error.suspension.pending.calls`, then call ' +
+            'agent.resumeApproval(error.suspension, decisions).',
+        // `messages` must never reach here: `details` is the log-safe form the
+        // console tracer and the SSE serializer both print, and it holds the
+        // entire conversation.
+        details: { toolNames: names, count: names.length },
+      },
+    )
+    this.suspension = suspension
   }
 }
 
