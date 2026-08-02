@@ -51,7 +51,7 @@ export function Terminal({
       </div>
 
       {/* Body. `min-h` is fixed so the page does not reflow as lines appear. */}
-      <div className="min-h-[19rem] overflow-x-auto p-4 font-mono text-[13px] leading-relaxed sm:min-h-[21rem] sm:p-5 sm:text-sm">
+      <div className="min-h-76 overflow-x-auto p-4 font-mono text-[13px] leading-relaxed sm:min-h-84 sm:p-5 sm:text-sm">
         {visible.map((line, index) => (
           <TraceRow key={index} line={line} />
         ))}
