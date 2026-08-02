@@ -1,5 +1,7 @@
 import { ConfigurationError } from '../errors/errors.js'
 import type { ApprovalDecision, ApprovalSuspension } from '../guardrails/types.js'
+import { handoffTools, resolveHandoffs } from '../handoffs/handoff.js'
+import type { HandoffTarget, ResolvedHandoff } from '../handoffs/types.js'
 import type { RunResult } from '../run/result.js'
 import { executeRun, runAgent } from '../run/runner.js'
 import { streamAgent, type StreamedRun } from '../run/stream.js'
@@ -56,6 +58,7 @@ export class Agent<TOutput = string> {
   readonly name: string
   private readonly config: AgentConfig<TOutput>
   private readonly registry: ToolRegistry
+  private readonly handoffs: ReadonlyMap<string, ResolvedHandoff>
 
   constructor(config: AgentConfig<TOutput>) {
     if (!config.name || config.name.trim().length === 0) {
@@ -78,9 +81,18 @@ export class Agent<TOutput = string> {
       })
     }
 
+    // Resolved here rather than on first run for the same reason the registry
+    // is: a target with no model, or two targets whose transfer tools collide,
+    // is a mistake in the code the developer just wrote.
+    this.handoffs = resolveHandoffs(config.handoffs, {
+      name: config.name,
+      toolNames: (config.tools ?? []).map((t) => t.name),
+    })
+
     // Constructing the registry here surfaces duplicate tool names immediately,
     // at the point the developer wrote the mistake, rather than on first run.
-    this.registry = new ToolRegistry(config.tools)
+    // Transfer tools are part of it, so a `toolGuardrail` can name one.
+    this.registry = new ToolRegistry([...(config.tools ?? []), ...handoffTools(this.handoffs)])
 
     // A tool guardrail naming a tool that does not exist would simply never
     // fire — a typo in a security control that fails *open* and is invisible
@@ -110,9 +122,18 @@ export class Agent<TOutput = string> {
     return this.config.model.modelId
   }
 
-  /** Registered tool names, in declaration order. */
+  /**
+   * Registered tool names, in declaration order — including the
+   * `transfer_to_*` tool each handoff contributes, because that is what the
+   * model sees.
+   */
   get toolNames(): readonly string[] {
     return this.registry.names()
+  }
+
+  /** Agents this one can hand off to, in declaration order. */
+  get handoffNames(): readonly string[] {
+    return [...this.handoffs.values()].map((handoff) => handoff.config.name)
   }
 
   /**
@@ -337,6 +358,20 @@ export class Agent<TOutput = string> {
   /** A copy of this agent with additional tools appended. */
   withTools(...tools: readonly AnyTool[]): Agent<TOutput> {
     return this.clone<TOutput>({ tools: [...(this.config.tools ?? []), ...tools] })
+  }
+
+  /**
+   * A copy of this agent that can also hand off to these specialists.
+   *
+   * The way to build a routing graph without a circular reference at
+   * construction: define the specialists first, then attach them.
+   *
+   * ```ts
+   * const router = triage.withHandoffs(billing, technical)
+   * ```
+   */
+  withHandoffs(...handoffs: readonly HandoffTarget[]): Agent<TOutput> {
+    return this.clone<TOutput>({ handoffs: [...(this.config.handoffs ?? []), ...handoffs] })
   }
 
   /** The resolved configuration. Read-only; mutating it does nothing. */

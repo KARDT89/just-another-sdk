@@ -4,11 +4,11 @@
 
 |         |                                                           |
 | ------- | --------------------------------------------------------- |
-| Step    | 5 of 8 — guardrails & approval gates                      |
+| Step    | 6 of 8 — handoffs                                         |
 | Date    | 2026-08-02                                                |
-| Package | `just-another-sdk@0.1.0` — **published**; 0.2.0 pending   |
-| Size    | 52 source files, ~10.4k lines, **0 runtime dependencies** |
-| Tests   | 426 — 413 offline (~2.2s) + 13 live                       |
+| Package | `just-another-sdk@0.2.0` — **published**; 0.3.0 pending   |
+| Size    | 54 source files, ~11.2k lines, **0 runtime dependencies** |
+| Tests   | 461 — 449 offline (~2.2s) + 12 live                       |
 
 This file is rewritten at the end of every step. It is the current state of the
 project, not a changelog — release history lives in
@@ -21,21 +21,33 @@ project, not a changelog — release history lives in
 
 Grouped by the seam it occupies. Step 1 built the loop, step 2 wrapped the model
 call inside it, step 3 wrapped the loop itself, step 3.5 wrapped the result so it
-could reach a browser, step 4 wrapped the _answer_. Step 5 wrapped the whole
-thing in **policy**: three places to refuse, and one place to ask a person.
-**The loop body has not changed since step 1** — this step touched exactly one
-line inside it, and it is not control flow.
+could reach a browser, step 4 wrapped the _answer_, step 5 wrapped the whole
+thing in **policy**. Step 6 changed **who is inside the loop**.
+
+That last one is the honest framing, and it is the first step since step 1 to
+touch the loop body meaningfully — see [Decisions](#decisions-made-in-step-6).
 
 ### Agent runtime
 
-| File                                                          | Does                                                                  |
-| ------------------------------------------------------------- | --------------------------------------------------------------------- |
-| [`run/runner.ts`](../packages/core/src/run/runner.ts)         | The loop. Model call → tool execution → repeat, bounded by `maxTurns` |
-| [`run/model-call.ts`](../packages/core/src/run/model-call.ts) | Stream-vs-generate dispatch, the retry loop, the fallback chain       |
-| [`run/run-state.ts`](../packages/core/src/run/run-state.ts)   | The only mutable object in the hot path; created fresh per run        |
-| [`run/result.ts`](../packages/core/src/run/result.ts)         | `RunResult`, `RunStep`, `StopReason`                                  |
-| [`agent/agent.ts`](../packages/core/src/agent/agent.ts)       | `Agent` — `.run()`, `.stream()`, `.session()`, `.clone()`             |
-| [`agent/types.ts`](../packages/core/src/agent/types.ts)       | `AgentConfig`, `RunOptions`, `AGENT_DEFAULTS`                         |
+| File                                                                  | Does                                                                         |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| [`run/runner.ts`](../packages/core/src/run/runner.ts)                 | The loop. Model call → tool execution → repeat, bounded by `maxTurns`        |
+| [`run/runner.ts`](../packages/core/src/run/runner.ts) · `ActiveAgent` | Everything the loop needs from whichever agent is holding the run            |
+| [`run/model-call.ts`](../packages/core/src/run/model-call.ts)         | Stream-vs-generate dispatch, the retry loop, the fallback chain              |
+| [`run/run-state.ts`](../packages/core/src/run/run-state.ts)           | The only mutable object in the hot path; created fresh per run               |
+| [`run/result.ts`](../packages/core/src/run/result.ts)                 | `RunResult`, `RunStep`, `StopReason`                                         |
+| [`agent/agent.ts`](../packages/core/src/agent/agent.ts)               | `Agent` — `.run()`, `.stream()`, `.session()`, `.clone()`, `.withHandoffs()` |
+| [`agent/types.ts`](../packages/core/src/agent/types.ts)               | `AgentConfig`, `RunOptions`, `AGENT_DEFAULTS`                                |
+
+### Handoffs
+
+| File                                                                        | Does                                                                        |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| [`handoffs/types.ts`](../packages/core/src/handoffs/types.ts)               | `HandoffTarget`, `HandoffSpec`, `HandoffRefusal` — plain data               |
+| [`handoffs/handoff.ts`](../packages/core/src/handoffs/handoff.ts)           | Resolve targets, synthesize the transfer tool, repair a filtered transcript |
+| [`run/runner.ts`](../packages/core/src/run/runner.ts) · `decideHandoff`     | The three limits, applied to a turn's transfer calls                        |
+| [`run/runner.ts`](../packages/core/src/run/runner.ts) · `applyHandoff`      | The switch: resolve, narrow, brief, emit — shared with the resume prologue  |
+| [`run/run-state.ts`](../packages/core/src/run/run-state.ts) · `switchAgent` | `agentPath`, the depth counter, and the view log                            |
 
 ### Structured output
 
@@ -116,7 +128,7 @@ line inside it, and it is not control flow.
 
 | File                                                                        | Does                                                              |
 | --------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| [`events/events.ts`](../packages/core/src/events/events.ts)                 | The typed event union — **17** members                            |
+| [`events/events.ts`](../packages/core/src/events/events.ts)                 | The typed event union — **19** members                            |
 | [`events/emitter.ts`](../packages/core/src/events/emitter.ts)               | Synchronous bus; a throwing listener cannot break a run           |
 | [`events/console-tracer.ts`](../packages/core/src/events/console-tracer.ts) | Ready-made readable trace, with redaction applied before printing |
 
@@ -134,6 +146,7 @@ The suite, by file:
 | `sessions`                                      | 144   | no                                      |
 | `guardrails`                                    | 40    | no                                      |
 | `structured-output`                             | 37    | no                                      |
+| `handoffs`                                      | 35    | no                                      |
 | `resumable`                                     | 26    | no                                      |
 | `streaming`                                     | 23    | no                                      |
 | `http-stream` · `reliability`                   | 38    | no                                      |
@@ -153,19 +166,21 @@ same assertions or visibly not.
 These are the design. Every future step must preserve them, and each has tests.
 
 1. **The loop always terminates.** Every exit path sets a `stopReason`. A model
-   that calls tools forever costs `maxTurns` requests, not an afternoon.
+   that calls tools forever costs `maxTurns` requests, not an afternoon. A chain
+   of agents costs the same, because `maxTurns` is a budget for the **run**.
 2. **A completed run never throws** — with a documented and closed list of
    exceptions: cancellation, provider failure, `onToolError: 'throw'`,
    `InvalidOutputError`, `GuardrailError`, and `ApprovalRequiredError`. Tool
-   failures are still recoverable results, and so is a **guardrail-blocked tool
-   call** — only input and output rejections throw.
+   failures are still recoverable results, and so are a **guardrail-blocked tool
+   call** and a **refused handoff** — only input and output rejections throw.
 3. **Every turn is recorded.** `steps`, `usage`, and `messages` are complete even
    when a run stops early — so tracing is a formatter over existing data. A
    repair is a model call, so it is a step; it is not a turn, so it does not
-   count against `maxTurns`. The same is true of a resume, which replays tool
-   calls a suspended run left outstanding.
+   count against `maxTurns`. The same is true of a resume. Each step names the
+   agent that took it.
 4. **A streamed run and a normal run are the same run.** Same loop, same
-   ordering, same `RunResult`. Only the source of the text differs.
+   ordering, same `RunResult`. Only the source of the text differs. A handoff did
+   not change this, because a handoff is not a new run.
 5. **Only a completed run is persisted.** A run that threw mid-turn can leave an
    assistant message holding tool calls whose results never arrived; every
    provider rejects that on the next request. `max_turns` is a completion and
@@ -173,88 +188,95 @@ These are the design. Every future step must preserve them, and each has tests.
 
 ---
 
-## Decisions made in step 5
+## Decisions made in step 6
 
-All three of step 4's open questions are answered, and the two "Intended API"
-sketches in the docs were revised — consciously, and with the reasons written
-into the pages themselves.
+All three of step 5's open questions are answered, and the handoffs page was
+revised against what it had committed to — consciously, with the reason written
+into the page itself.
 
-| Question                                    | Answer                                 | Why                                                                                                                                                                                                           |
-| ------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Function or object?**                     | Named object                           | The brief requires "guardrail triggered" in a trace, and `guardrail #1` is useless in production. `tool()` set the precedent. A name also makes a `tools` filter checkable at construction                    |
-| **Does a blocked run throw or return?**     | Throw — and `StopReason` gains nothing | Step 4's precedent applied literally: a `RunResult<Ticket>` with no ticket is the lie `InvalidOutputError` exists to prevent. Throwing also gave `stream()`, `session()`, and `resumable()` approval for free |
-| **Where does approval state live?**         | Nowhere — the suspension is plain JSON | No `ApprovalStore`, no adapter per backend, and nothing written mid-run, so invariant 5 needs no special case                                                                                                 |
-| **`toolGuardrails`: record or array?**      | Array with a `tools` filter            | A record cannot say "every tool", its keys are tool names rather than guardrail names, and a key naming a nonexistent tool is a **silent no-op that fails open**                                              |
-| **Resume method name**                      | `resumeApproval`                       | `agent.resume(streamId)` already means re-attaching a reader to a recorded stream. The committed doc had not noticed                                                                                          |
-| **Can a tool guardrail rewrite arguments?** | No                                     | The seam sits _after_ the schema so the values are trustworthy; writing back would bypass it or need a second validation pass. Clamping belongs in the schema                                                 |
+| Question                                  | Answer                              | Why                                                                                                                                                                                                  |
+| ----------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Replace the run, or nest inside it?**   | Flat — one run, `agentPath`         | A nested run means two `runId`s, two event streams to merge for `stream()`, two session saves to reconcile, and `maxTurns` threaded by hand. Invariant 4 survives only because there is one run      |
+| **`max_handoffs`: stop reason or error?** | **Neither** — refuse the call       | The committed doc promised a `StopReason`. Both alternatives discard a run whose conversation is valid and whose current agent could answer. Refusing the _call_ leaves invariants 1 and 2 untouched |
+| **Whose `outputSchema` wins?**            | The initiator's                     | `triage.run<Ticket>()` returning whatever the specialist happened to declare makes `RunResult<T>` a lie. The _instruction_ still follows the acting agent, so the specialist is told the shape       |
+| **`handoff.end`?**                        | Dropped                             | A flat handoff is a transition, not a span. The receiving agent holds the run until it ends or transfers onward, so the only honest close is `run.finish` — which now carries `agentPath`            |
+| **Where do the limits live?**             | After execution, before the results | The transfer tool has no side effect, so "run it then refuse it" costs nothing and keeps the limit checks out of `executeToolCalls` entirely                                                         |
 
 Three traps the design is built around, each with a test that fails without it:
 
-- **The `onToolError: 'throw'` trap.** The runner throws on any `outcome.error`
-  under that flag. A guardrail rejection that set it would abort the run for
-  anyone using it — so a rejection sets `blockedBy` instead and leaves `error`
-  undefined. Tested under both policies.
-- **Double execution.** A turn holding two tool calls where only one is gated
-  would run the ungated one, suspend, and run it _again_ on resume. Fixed by
-  splitting `executeToolCalls` into prepare and invoke with a barrier: if any
-  call needs a human, none run. The test asserts handler call counts, not just
-  outcomes.
-- **Approval replay.** Only the resume prologue reads `options.approvals`; the
-  in-loop gate never does. An approval authorises one call, by id, once — a
-  property of the code shape rather than a check that can rot. Tested by having
-  the model call the same gated tool twice.
+- **The `onToolError: 'throw'` trap, again.** A refused transfer sets no `error`
+  on the outcome, exactly as a guardrail rejection does not. Someone who set that
+  flag so a broken database aborts the run must not lose the run to a routing
+  policy. Tested under both policies.
+- **The approval-resume trap.** `settleApprovals` runs _before_ the loop. If the
+  approved call was a transfer and nothing applied it, the human says yes, the
+  tool result says "transferred to billing", and triage answers the question it
+  just delegated. It returns the accepted handoff so both it and the loop go
+  through one `applyHandoff`.
+- **The filter-as-deletion trap.** A `filter` narrows `state.view`; the session
+  save and `RunResult.messages` read `state.messages`. Two accessors instead of
+  one, because otherwise delegation becomes a way to erase a user's history.
+  Tested with `filter: () => []` and a real store.
 
 Things the plan did not anticipate:
 
-- **A resume must not demand a decision for every outstanding call.** The first
-  implementation required one per tool call in the suspended turn, so an ungated
-  call sitting beside a gated one re-suspended forever. The fix is smaller than
-  the bug: hand everything not explicitly denied back to `executeToolCalls` with
-  a gate that downgrades `requireApproval` only for approved ids. Ungated calls
-  run, approved calls run, undecided ones re-suspend through the ordinary path,
-  and rejections still reject. Caught by the two-parallel-calls test.
-- **`RunState` gained its first mutating method.** `replaceFinalText` edits the
-  log rather than appending to it, which no other code in the SDK does. It earns
-  the exception: an output guardrail that scrubs PII has to scrub it from
-  `messages` too, or the session stores the original and hands it back next turn.
-  It updates the matching step's text as well, so `steps` and `messages` cannot
-  drift.
+- **The loop body genuinely changed this time.** Steps 2–5 could each claim they
+  left it alone; this one cannot. Nine hoisted `const`s above the loop all had to
+  become per-agent, and a loop reading nine variables that must be swapped in
+  lockstep is a loop with nine chances to swap eight of them. They are one
+  `ActiveAgent` record now, resolved lazily and memoized per config. The 426
+  existing tests were the canary for that substitution and passed unmodified.
+- **`RunState` grew a second log.** `viewLog` stays `undefined` until a _filtered_
+  handoff happens, so the default path allocates nothing and behaves exactly as
+  before. `replaceFinalText` patches the view by object identity rather than by
+  index, because after a filter the two logs are not aligned.
+- **`repairPairing` needed a second pass.** Dropping orphaned tool results can
+  _create_ the other illegal shape — an assistant turn whose calls are now
+  unanswered. The fix keeps the turn's text and drops only the dangling calls.
+- **`maxHandoffs` resets across a suspension.** A suspension carries messages, not
+  counters. Cycle detection is unaffected because it reads the route, which is
+  reconstructed from the conversation. Documented rather than papered over.
 
 ### Zero dependencies held
 
-Nothing added. The guardrail module is types plus two loops.
+Nothing added. The transfer tool's parameters are written as raw JSON Schema
+precisely because the SDK cannot import a validator to describe its own single
+optional string.
 
 ## Verified vs unverified
 
-| Claim                                                         | How it was checked                                        | Result         |
-| ------------------------------------------------------------- | --------------------------------------------------------- | -------------- |
-| Lint, format, typecheck, test, build                          | `pnpm check` across 11 workspaces                         | pass           |
-| The 386 step-4 tests still pass                               | unmodified — `tools.test.ts` was the canary for the split | pass           |
-| **The loop body changed by exactly one line**                 | diffed the `while` block against `HEAD` programmatically  | pass           |
-| An input rejection costs zero model calls                     | `model.calls.length === 0`                                | pass           |
-| A guardrail that throws fails closed                          | becomes `GuardrailError`, model never called              | pass           |
-| A blocked tool call finishes under **both** `onToolError`     | same script, both policies, both `stopReason: 'finish'`   | pass           |
-| Two parallel calls, one gated → neither ran                   | handler spies; after resume each ran exactly once         | pass           |
-| A suspension survives `JSON.stringify` → `parse`              | resumed from the re-parsed object                         | pass           |
-| An approval cannot override a `reject`                        | second guardrail rejects; handler never invoked           | pass           |
-| A re-called gated tool suspends again                         | approval is not standing permission                       | pass           |
-| An unknown `toolCallId` fails loud                            | `ConfigurationError` listing the expected ids             | pass           |
-| A suspended run persists nothing; a resumed one persists once | store empty, then exactly four messages                   | pass           |
-| An output rewrite reaches output, text, messages, store       | plus the matching `RunStep.text`                          | pass           |
-| A guardrail sees coerced, validated tool arguments            | `z.coerce.number()` — guardrail saw `42`, not `'42'`      | pass           |
-| `ApprovalRequiredError.toJSON()` omits the conversation       | distinctive user message absent from the log-safe form    | pass           |
-| Suspension works identically through `stream()`               | `approval.required` in the iterated events                | pass           |
-| The example runs with no API key at all                       | ran it; all four acts                                     | pass           |
-| **Real Postgres and real Redis**                              | not run — adapters tested against fakes                   | **unverified** |
-| **Real streaming against a real model**                       | still not run — needs a key                               | **unverified** |
-| **`strict: true` against a real OpenAI endpoint**             | offline-untestable; needs a key                           | **unverified** |
-| **`responseFormat` on a turn the model wants a tool for**     | pinned offline; the live interaction is untested          | **unverified** |
+| Claim                                                           | How it was checked                                                 | Result         |
+| --------------------------------------------------------------- | ------------------------------------------------------------------ | -------------- |
+| Lint, format, typecheck, test, build                            | `pnpm check` across 12 workspaces                                  | pass           |
+| **The 426 step-5 tests still pass**                             | unmodified — the canary for the `ActiveAgent` substitution         | pass           |
+| Two agents transfer; the receiver's model, tools, prompt serve  | `steps[].modelId` is `triage, billing, billing`                    | pass           |
+| A cycle is refused rather than followed                         | `A → B → A`; the refusal names the route                           | pass           |
+| `maxHandoffs` refuses the call, and the run still answers       | `stopReason: 'finish'`, `handoff_refused` in the result            | pass           |
+| A refusal finishes under **both** `onToolError` policies        | same script, both policies                                         | pass           |
+| Two transfers in one turn → first wins, second refused          | `already_transferring`, one `handoff.start`                        | pass           |
+| `maxTurns` is shared, not per agent                             | `maxTurns: 3` across a chain → `turns === 3`                       | pass           |
+| A transfer is gated by the routing agent's tool guardrails      | rejected; the specialist's model never called                      | pass           |
+| **An approved transfer takes effect on resume**                 | `agentPath` is `['triage','billing']` after `resumeApproval`       | pass           |
+| A denied transfer leaves the router holding the conversation    | specialist's model never called                                    | pass           |
+| A suspension survives `JSON.stringify` → `parse`                | resumed from the re-parsed object                                  | pass           |
+| A `filter` narrows the request and **nothing else**             | `filter: () => []`; the store still holds the transcript           | pass           |
+| A filter that orphans a tool result is repaired                 | no `tool` message reaches the provider                             | pass           |
+| The initiator's `outputSchema` governs; the target's is ignored | plus the instruction reaching the receiver's system prompt         | pass           |
+| `handoff.start` sits between `tool.end` and the next request    | full ordering assertion                                            | pass           |
+| `agentPath` arrives identically through `stream()`              | iterated the events                                                | pass           |
+| An unreached handoff target is never resolved                   | its `instructions` thunk was never called                          | pass           |
+| The example runs with no API key at all                         | ran it; all four acts                                              | pass           |
+| **Real Postgres and real Redis**                                | not run — adapters tested against fakes                            | **unverified** |
+| **Real streaming against a real model**                         | still not run — needs a key                                        | **unverified** |
+| **A handoff against a real model**                              | offline only; whether models _choose_ to transfer well is untested | **unverified** |
+| **`strict: true` against a real OpenAI endpoint**               | offline-untestable; needs a key                                    | **unverified** |
 
-> **What stateless approval does not do.** It cannot _authenticate_ a decision —
-> that needs a shared secret or a store, and it has neither. The four structural
-> properties above are real; replay of a captured `{ suspension, decisions }`
-> payload against your own endpoint is your transport's problem, and the docs say
-> so rather than implying otherwise.
+> **What the offline suite cannot tell you about handoffs.** Every mechanical
+> property above is real. Whether a router _decides well_ — whether the
+> synthesized description is enough for a model to pick the right specialist — is
+> a prompt-quality question that a scripted provider cannot answer. The first
+> live run of `example:handoffs` against a real model is the test that matters,
+> and it has not happened.
 
 ---
 
@@ -266,64 +288,61 @@ Mapped to the 12 graded categories in [`CLAUDE.md`](../CLAUDE.md).
 | --- | ----------------------------- | ----- | ----------- | ----------------------------------------------------------------------------------- |
 | 1   | Agent runtime                 | 15    | **done**    | —                                                                                   |
 | 2   | Tools                         | 10    | **done**    | Built-in tool pack (step 7) is additive                                             |
-| 3   | Handoffs                      | 10    | not started | Step 6                                                                              |
+| 3   | Handoffs                      | 10    | **done**    | Delegation, context transfer, three limits, events, docs, a runnable example        |
 | 4   | Guardrails                    | 10    | **done**    | Input, output, tool, approval gates, and a fail-closed rule                         |
 | 5   | Memory & sessions             | 10    | **done**    | 5 adapters, windowed reads, undo, trimming, summarization, events                   |
 | 6   | Structured output + streaming | 10    | **done**    | `outputSchema`, repair, typed inference, HTTP/SSE/resumable streaming               |
 | 7   | Reliability                   | 10    | **done**    | Timeouts, cancellation, loop bounds, typed errors, retries, fallback, secret safety |
-| 8   | Tracing                       | 5     | **partial** | `steps[]` + 17 events + console tracer + an SSE feed; no JSON/OTel exporters        |
+| 8   | Tracing                       | 5     | **partial** | `steps[]` + 19 events + console tracer + an SSE feed; no JSON/OTel exporters        |
 | 9   | Developer experience          | 10    | **done**    | Typed end to end, zero-config install, actionable errors, shipped test helpers      |
-| 10  | Docs & examples               | 10    | **partial** | 16 pages + 8 runnable examples; 1 page forward-looking; **not yet hosted**          |
+| 10  | Docs & examples               | 10    | **partial** | 17 pages + 9 runnable examples, none forward-looking; **not yet hosted**            |
 | 11  | Product thinking              | 10    | **done**    | Differentiation is real and demonstrable                                            |
 | 12  | Demo & pitch                  | 10    | not started | Landing page done; **no video**                                                     |
 
-**Roughly 110–118 of 120 addressable today.** The cheapest remaining marks, in
-order: hosting the docs (category 10), the video (12), handoffs (3).
+**Roughly 115–120 of 120 addressable today.** Everything left is launch work:
+hosting the docs (category 10) and the video (12).
 
 ---
 
-## Next step — 6 of 8: handoffs
+## Next step — 7 of 8: the built-in tool pack
 
-The last unstarted category, and the last substantial runtime work before launch.
-A handoff is modelled as a tool, which is why it comes after guardrails: it flows
-through `executeToolCall` and therefore inherits tool guardrails for free.
+The last additive runtime work. Nothing in it changes the loop; the point is that
+`npm i just-another-sdk` should give a developer something to _do_ on the first
+afternoon rather than a set of interfaces to implement.
 
-- [ ] **`handoffs` on `AgentConfig`** — an agent, or `{ agent, filter?, describe? }`
-      to narrow the context handed over and add a briefing note.
-- [ ] **`RunResult.agentPath`** — `['triage', 'billing']`, so a trace shows the
-      whole route.
-- [ ] **Loop prevention, three ways**: a `maxHandoffs` ceiling, cycle detection
-      for A → B → A, and a `maxTurns` budget shared across the chain rather than
-      per agent.
-- [ ] **`handoff.start` / `handoff.end` events**, and a tracer line.
-- [ ] **Un-stub** [`handoffs.mdx`](../apps/web/content/docs/handoffs.mdx) — note
-      that it commits to `stopReason: 'max_handoffs'`, which step 5 has good
-      reason to revisit given it added no `StopReason` members.
+- [ ] **`fetchTool`** — HTTP with an allowlist, a size cap, and a redirect bound.
+      Dangerous by default is the whole risk here; it ships locked down.
+- [ ] **`fileTools`** — read/write/list rooted at a directory, with traversal
+      refused rather than normalised away.
+- [ ] **`calculator`** — expression evaluation with no `eval`, no `Function`.
+- [ ] **`webSearch`** — provider-injected, like the Redis and Postgres adapters,
+      so the pack stays at zero dependencies.
+- [ ] Ship them from `just-another-sdk/tools`, each composable with the
+      `toolGuardrails` that already exist.
 
 ### Acceptance
 
-`pnpm check` green · two agents hand off and the trace shows it · a cycle is
-detected rather than followed · a handoff tool call is subject to the tool
-guardrails that already exist · the 426 existing tests pass unmodified.
+`pnpm check` green · every tool has a failure test as well as a success one ·
+the sandbox tools have an escape test that must fail to escape · zero new runtime
+dependencies · the 461 existing tests pass unmodified.
 
 ### Open design questions
 
-1. **Does a handoff replace the run, or nest inside it?** `agentPath` implies one
-   run with several agents; a nested run would give each its own `RunResult`.
-2. **`max_handoffs`: a `StopReason` or an error?** Step 5 deliberately added no
-   `StopReason` members. Consistency argues for an error; the committed doc says
-   otherwise.
-3. **Does the receiving agent's `outputSchema` win, or the initiator's?** Both are
-   defensible, and the answer changes what `RunResult<T>` means for a chain.
+1. **Does `fetchTool` allowlist by default, or refuse without configuration?**
+   Refusing is safer and worse to demo; an allowlist of nothing is the same thing
+   with a friendlier error.
+2. **Is the pack one import or four?** One is easier to show; four is easier to
+   tree-shake, and a filesystem tool in an edge bundle is dead weight.
+3. **Do these ship in core or a second package?** A second package keeps core's
+   surface honest but doubles the release process for a solo maintainer.
 
 ---
 
 ## Later steps
 
-| Step | Scope                                                                             |
-| ---- | --------------------------------------------------------------------------------- |
-| 7    | **Built-in tool pack** — HTTP fetch, sandboxed filesystem, calculator, web search |
-| 8    | **Launch** — host the docs, record the demo video, write the pitch                |
+| Step | Scope                                                              |
+| ---- | ------------------------------------------------------------------ |
+| 8    | **Launch** — host the docs, record the demo video, write the pitch |
 
 ---
 
@@ -331,20 +350,29 @@ guardrails that already exist · the 426 existing tests pass unmodified.
 
 Only you can do these.
 
-- [ ] **Publish 0.2.0.** `just-another-sdk@0.1.0` went up on 2026-08-01. Five
-      changesets are pending, so `pnpm changeset version` bumps to 0.2.0 and
-      writes the first real `CHANGELOG.md`. Check it before merging — it folds in
-      three entries from before 0.1.0 shipped.
-- [ ] **Add `NPM_TOKEN`** to GitHub → Settings → Secrets → Actions, and **allow
-      Actions to create pull requests** (Settings → Actions → General → Workflow
-      permissions). The release workflow has never published: 0.1.0 was pushed by
-      hand, and the last run failed on the PR permission. Use a **Granular Access
-      Token** — classic tokens that bypass 2FA are being restricted.
-- [ ] **Delete the stale branch** left by that failed run:
+- [ ] **Publish 0.3.0 by hand.** One changeset is pending. `pnpm changeset version`
+      bumps to 0.3.0 and writes the changelog; `pnpm release` builds and publishes,
+      prompting for an OTP.
+- [ ] **The release workflow still cannot publish.** Both attempts failed with
+      `ERR_PNPM_OTP_NON_INTERACTIVE`: the npm account is set to
+      `two-factor auth: auth-and-writes`, so a stored `NPM_TOKEN` can never
+      satisfy the registry on its own. **0.1.0 and 0.2.0 were both pushed by
+      hand.** The workflow's `version` half works — it opened and merged the
+      "Version Packages" PR — only `publish` fails. Three ways out, best first:
+      **npm Trusted Publishing (OIDC)**, which bypasses 2FA and stores no token
+      (the workflow already requests `id-token: write`, but whether pnpm 11.15
+      drives it is unverified); a **Granular Access Token** with 2FA bypass,
+      which npm is restricting; or relaxing the account to
+      `two-factor auth: auth-only`, which weakens the account to fix CI.
+- [ ] **Delete the stale branch** left by the failed run:
       `git push origin --delete changeset-release/main`.
 - [ ] **Uncomment `OPENROUTER_API_KEY` in `examples/.env`**, then run
       `pnpm example:stream`, `example:structured`, `example:sessions`,
-      `example:server`, and `example:resumable`. `example:guardrails` needs no key.
+      `example:server`, and `example:resumable`. `example:guardrails` and
+      `example:handoffs` need no key.
+- [ ] **Run `example:handoffs` against a real model once.** Swap the mocks for
+      `openrouter(...)` and check the router actually picks the right specialist.
+      It is the only claim in this file the offline suite cannot make.
 - [ ] **Point Vercel at `apps/web`** — [`vercel.json`](../apps/web/vercel.json)
       has the monorepo build command already. Then put the URL in
       [`README.md`](../README.md) and

@@ -87,12 +87,14 @@ pnpm check            # format:check + lint + typecheck + test + build
 
 ```bash
 echo "OPENROUTER_API_KEY=sk-or-v1-..." > examples/.env
-pnpm example:hello     # a minimal agent
-pnpm example:tools     # tools, parallel calls, failure recovery, tracing
-pnpm example:stream    # token streaming, cancellation, model fallback
-pnpm example:sessions  # a conversation that survives the process exiting
-pnpm example:server    # a streaming chat backend with sessions and undo
-pnpm example:resumable # a run that outlives a disconnected client
+pnpm example:hello      # a minimal agent
+pnpm example:tools      # tools, parallel calls, failure recovery, tracing
+pnpm example:stream     # token streaming, cancellation, model fallback
+pnpm example:sessions   # a conversation that survives the process exiting
+pnpm example:server     # a streaming chat backend with sessions and undo
+pnpm example:resumable  # a run that outlives a disconnected client
+pnpm example:guardrails # three places to refuse, one to ask a person — no key
+pnpm example:handoffs   # routing to specialists, loop prevention — no key
 ```
 
 ### Testing
@@ -115,8 +117,8 @@ pnpm --filter just-another-sdk test:coverage
 
 ## Roadmap
 
-Multi-agent handoffs · built-in tool pack · native Anthropic and Gemini
-providers.
+Built-in tool pack · native Anthropic and Gemini providers · trace exporters for
+JSON and OpenTelemetry.
 
 Each is designed and documented under **Coming next** in the docs, so the intended
 API is visible before it ships.

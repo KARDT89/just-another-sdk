@@ -11,6 +11,7 @@ import type {
   InputGuardrail,
   OutputGuardrail,
 } from '../guardrails/types.js'
+import type { HandoffTarget } from '../handoffs/types.js'
 import type { StandardSchemaV1 } from '../schema/standard-schema.js'
 import type { ObjectJsonSchema } from '../types/json-schema.js'
 import type { ModelMessage } from '../types/messages.js'
@@ -49,10 +50,49 @@ export interface AgentConfig<TOutput = string> {
   readonly tools?: readonly AnyTool[]
 
   /**
+   * Specialists this agent can hand the conversation to.
+   *
+   * Each becomes a `transfer_to_<name>` tool the model may call. When it does,
+   * the receiving agent's instructions, tools, and model take over for the rest
+   * of the run — **one run**, one `runId`, one `RunResult`, and
+   * `result.agentPath` recording the route:
+   *
+   * ```ts
+   * const triage = new Agent({
+   *   name: 'triage',
+   *   instructions: 'Route the user to the right specialist. Do not answer directly.',
+   *   model,
+   *   handoffs: [billing, technical],
+   * })
+   *
+   * const result = await triage.run('I was charged twice for March.')
+   * result.agentPath   // ['triage', 'billing']
+   * ```
+   *
+   * Pass `{ agent, filter?, describe? }` instead of a bare agent to narrow the
+   * context handed over or add a briefing note.
+   *
+   * Because a transfer *is* a tool call, it inherits everything tool calls
+   * already have: this agent's `toolGuardrails` can gate or require approval for
+   * it, and it appears in traces.
+   */
+  readonly handoffs?: readonly HandoffTarget[]
+
+  /**
    * Hard ceiling on model calls per run. Reaching it ends the run with
    * `stopReason: 'max_turns'` rather than throwing or looping. Default 10.
    */
   readonly maxTurns?: number
+
+  /**
+   * Hard ceiling on transfers in one run. Default 5.
+   *
+   * Reaching it does **not** end the run: the transfer tool returns an error the
+   * model reads, and the agent holding the conversation answers it directly.
+   * Same for a cycle — `A → B → A` is refused rather than followed. `maxTurns`
+   * is shared across the whole chain and remains the hard backstop.
+   */
+  readonly maxHandoffs?: number
 
   readonly maxOutputTokens?: number
   readonly temperature?: number
@@ -266,6 +306,9 @@ export interface RunOptions {
   /** Overrides {@link AgentConfig.maxTurns} for this run only. */
   readonly maxTurns?: number
 
+  /** Overrides {@link AgentConfig.maxHandoffs} for this run only. */
+  readonly maxHandoffs?: number
+
   /** Overrides {@link AgentConfig.toolChoice} for this run only. */
   readonly toolChoice?: ToolChoice
 
@@ -316,6 +359,7 @@ export type AgentInput = string | readonly ModelMessage[]
 /** Defaults applied when a config or run option is omitted. */
 export const AGENT_DEFAULTS: {
   readonly maxTurns: number
+  readonly maxHandoffs: number
   readonly toolTimeoutMs: number
   readonly modelTimeoutMs: number
   readonly onToolError: ToolErrorPolicy
@@ -325,6 +369,11 @@ export const AGENT_DEFAULTS: {
   readonly maxOutputRetries: number
 } = Object.freeze({
   maxTurns: 10,
+  // Five is past the point where a routing graph is still a routing graph. A
+  // chain that has transferred five times is not delegating, it is looping —
+  // and unlike `maxTurns` this ceiling refuses the transfer rather than ending
+  // the run, so the sixth request is answered by whoever is holding it.
+  maxHandoffs: 5,
   toolTimeoutMs: 30_000,
   modelTimeoutMs: 120_000,
   onToolError: 'return',

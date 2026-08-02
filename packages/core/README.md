@@ -109,6 +109,36 @@ const getWeather = tool({
 - **Failures are recoverable by default.** Set `onToolError: 'throw'` on the
   agent when a tool failure should void the whole task.
 
+## Handoffs
+
+One agent that knows everything is a prompt that knows nothing well. Give a cheap
+router some specialists and let it delegate:
+
+```ts
+const triage = new Agent({
+  name: 'triage',
+  instructions:
+    'Route the user to the right specialist. Do not answer directly.',
+  model,
+  handoffs: [billing, technical],
+})
+
+const result = await triage.run('I was charged twice for March.')
+
+result.output // the billing agent's answer
+result.agentPath // ['triage', 'billing']
+```
+
+A handoff is a **tool** — `transfer_to_billing` — so it inherits tool guardrails,
+human approval, timeouts, and tracing with no handoff-specific code. It is also
+**one run**: one `runId`, one usage total, one session save, and a `maxTurns`
+budget shared across the whole chain.
+
+Three limits stop a routing graph becoming a loop, and none of them ends the run:
+`maxHandoffs` (default 5), cycle detection for `A → B → A`, and that shared turn
+budget. A refused transfer is an error result the model reads, so the agent
+holding the conversation simply answers it.
+
 ## Handling failure
 
 Every error is an `AgentError` with a machine-readable `code`, a `retryable`
@@ -279,6 +309,7 @@ expect(model.calls).toHaveLength(2)
 | Setting          | Default    | Purpose                                                     |
 | ---------------- | ---------- | ----------------------------------------------------------- |
 | `maxTurns`       | `10`       | Bounds the loop — the model cannot spend your money forever |
+| `maxHandoffs`    | `5`        | Bounds delegation; the transfer is refused, not the run     |
 | `toolTimeoutMs`  | `30_000`   | Per tool call                                               |
 | `modelTimeoutMs` | `120_000`  | Per model call                                              |
 | `onToolError`    | `'return'` | Feed failures back to the model instead of throwing         |
@@ -298,8 +329,8 @@ optional but the whole thing is designed around it.
 
 ## Roadmap
 
-Multi-agent handoffs · built-in tool pack · native Anthropic and Gemini
-providers.
+Built-in tool pack · native Anthropic and Gemini providers · trace exporters for
+JSON and OpenTelemetry.
 
 ## License
 

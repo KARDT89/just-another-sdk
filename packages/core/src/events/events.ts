@@ -2,6 +2,7 @@ import type { FinishReason, ToolDefinition } from '../providers/provider.js'
 import type { StopReason } from '../run/result.js'
 import type { AgentError, SchemaIssue } from '../errors/errors.js'
 import type { PendingToolCall } from '../guardrails/types.js'
+import type { HandoffRefusal } from '../handoffs/types.js'
 import type { ToolCallPart, ToolResultPart, Usage } from '../types/messages.js'
 
 /**
@@ -124,6 +125,52 @@ export interface ToolEndEvent extends EventBase {
   readonly result: ToolResultPart
   readonly isError: boolean
   readonly durationMs: number
+}
+
+/**
+ * The conversation has been transferred to another agent.
+ *
+ * Emitted after the transfer tool's `tool.end` and before the receiving agent's
+ * first `model.request`, so a trace reads in the order things happened. Every
+ * event after it carries the receiving agent's name.
+ *
+ * There is deliberately **no `handoff.end`**. A handoff in this runtime is a
+ * transition, not a nested scope: the receiving agent holds the conversation
+ * until the run ends or it transfers onward, so the only honest close is
+ * `run.finish` — which carries `agentPath`.
+ */
+export interface HandoffStartEvent extends EventBase {
+  readonly type: 'handoff.start'
+  readonly turn: number
+  /** The agent giving up the conversation. Same as `agentName` on this event. */
+  readonly from: string
+  /** The agent taking it over. `agentName` on every event after this one. */
+  readonly to: string
+  readonly toolName: string
+  readonly toolCallId: string
+  /** What the model gave as its reason for transferring, if it gave one. */
+  readonly reason?: string
+  /** Messages the receiving agent will see, after any `filter`. */
+  readonly carriedCount: number
+}
+
+/**
+ * A transfer was refused by a loop-prevention limit.
+ *
+ * The run does **not** end. The model receives an error result and answers the
+ * user with the agent it already has, which is why this is an event rather than
+ * a `StopReason`.
+ */
+export interface HandoffRefusedEvent extends EventBase {
+  readonly type: 'handoff.refused'
+  readonly turn: number
+  readonly from: string
+  readonly to: string
+  readonly toolName: string
+  readonly toolCallId: string
+  readonly cause: HandoffRefusal
+  /** The message the model receives in place of the transfer. */
+  readonly reason: string
 }
 
 /**
@@ -272,6 +319,8 @@ export interface RunFinishEvent extends EventBase {
   readonly turns: number
   readonly usage: Usage
   readonly durationMs: number
+  /** Every agent that acted, in order. `[agentName]` when nothing was handed off. */
+  readonly agentPath: readonly string[]
 }
 
 /** The run is being abandoned by throwing. Always the last event when it fires. */
@@ -293,6 +342,8 @@ export type AgentEvent =
   | ModelFallbackEvent
   | ToolStartEvent
   | ToolEndEvent
+  | HandoffStartEvent
+  | HandoffRefusedEvent
   | GuardrailTriggeredEvent
   | ApprovalRequiredEvent
   | ApprovalResolvedEvent

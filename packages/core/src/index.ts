@@ -77,6 +77,14 @@ export type {
   ToolGuardrailVerdict,
 } from './guardrails/types.js'
 
+/* ── Handoffs ────────────────────────────────────────────────────────────── */
+
+/**
+ * Delegating a conversation to a specialist. Types only — a handoff is declared
+ * on the agent, and the transfer tool is synthesized for you.
+ */
+export type { AgentLike, HandoffRefusal, HandoffSpec, HandoffTarget } from './handoffs/types.js'
+
 /* ── Tools ───────────────────────────────────────────────────────────────── */
 
 export { tool } from './tools/tool.js'
@@ -138,6 +146,8 @@ export type {
   EventListener,
   EventOfType,
   GuardrailTriggeredEvent,
+  HandoffRefusedEvent,
+  HandoffStartEvent,
   ModelFallbackEvent,
   ModelRequestEvent,
   ModelResponseEvent,

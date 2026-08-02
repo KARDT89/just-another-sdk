@@ -8,6 +8,7 @@
     "---Core---",
     "agents",
     "tools",
+    "handoffs",
     "structured-output",
     "providers",
     "---Reliability---",
@@ -17,8 +18,6 @@
     "streaming",
     "sessions",
     "testing",
-    "---Coming next---",
-    "handoffs",
     "---Reference---",
     "examples",
     "api"

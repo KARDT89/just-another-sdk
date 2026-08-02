@@ -10,17 +10,17 @@ change in a patch release.
 
 ### Agents
 
-| Export            | Kind     | Description                                                                                                                                                                      |
-| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Agent`           | class    | `new Agent(config)`, `.run()`, `.stream()`, `.session()`, `.resumable()`, `.resume()`, `.resumeApproval()`, `.clone()`, `.withTools()`                                           |
-| `AgentSession`    | type     | What `.session(id)` returns: `run`, `stream`, `messages()`, `pop()`, `clear()`, `store`                                                                                          |
-| `run`             | function | `run(config, input, options)` — shorthand for a one-shot agent                                                                                                                   |
-| `runAgent`        | function | The loop itself, if you want it without the `Agent` wrapper                                                                                                                      |
-| `AGENT_DEFAULTS`  | const    | `maxTurns: 10`, `toolTimeoutMs: 30000`, `modelTimeoutMs: 120000`, `onToolError: 'return'`, `maxRetries: 2`, `retryDelayMs: 250`, `maxRetryDelayMs: 10000`, `maxOutputRetries: 1` |
-| `AgentConfig`     | type     | Constructor options — see [Agents](/docs/agents#configuration)                                                                                                                   |
-| `RunOptions`      | type     | Per-run options                                                                                                                                                                  |
-| `AgentInput`      | type     | `string \| ModelMessage[]`                                                                                                                                                       |
-| `ToolErrorPolicy` | type     | `'return' \| 'throw'`                                                                                                                                                            |
+| Export            | Kind     | Description                                                                                                                                                                                        |
+| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Agent`           | class    | `new Agent(config)`, `.run()`, `.stream()`, `.session()`, `.resumable()`, `.resume()`, `.resumeApproval()`, `.clone()`, `.withTools()`, `.withHandoffs()`                                          |
+| `AgentSession`    | type     | What `.session(id)` returns: `run`, `stream`, `messages()`, `pop()`, `clear()`, `store`                                                                                                            |
+| `run`             | function | `run(config, input, options)` — shorthand for a one-shot agent                                                                                                                                     |
+| `runAgent`        | function | The loop itself, if you want it without the `Agent` wrapper                                                                                                                                        |
+| `AGENT_DEFAULTS`  | const    | `maxTurns: 10`, `maxHandoffs: 5`, `toolTimeoutMs: 30000`, `modelTimeoutMs: 120000`, `onToolError: 'return'`, `maxRetries: 2`, `retryDelayMs: 250`, `maxRetryDelayMs: 10000`, `maxOutputRetries: 1` |
+| `AgentConfig`     | type     | Constructor options — see [Agents](/docs/agents#configuration)                                                                                                                                     |
+| `RunOptions`      | type     | Per-run options                                                                                                                                                                                    |
+| `AgentInput`      | type     | `string \| ModelMessage[]`                                                                                                                                                                         |
+| `ToolErrorPolicy` | type     | `'return' \| 'throw'`                                                                                                                                                                              |
 
 ### Tools
 
@@ -33,14 +33,25 @@ change in a patch release.
 | `ToolContext`                 | type     | Second argument to a handler: `runId`, `toolCallId`, `agentName`, `turn`, `signal` |
 | `ToolHandler`                 | type     | `(input, context) => output`                                                       |
 
+### Handoffs
+
+| Export           | Kind | Description                                                                    |
+| ---------------- | ---- | ------------------------------------------------------------------------------ |
+| `HandoffTarget`  | type | An `Agent`, an `AgentConfig`, or a `HandoffSpec`                               |
+| `HandoffSpec`    | type | `{ agent, filter?, describe?, toolName?, description? }`                       |
+| `HandoffRefusal` | type | `'max_handoffs' \| 'cycle' \| 'already_transferring'`                          |
+| `AgentLike`      | type | Anything with `toConfig()` — how a target is accepted without a runtime import |
+
+See [Handoffs](/docs/handoffs).
+
 ### Results
 
-| Export       | Kind     | Description                                                                                 |
-| ------------ | -------- | ------------------------------------------------------------------------------------------- |
-| `RunResult`  | type     | What `run()` resolves with                                                                  |
-| `RunStep`    | type     | One model call: `kind` (`turn`/`repair`/`resume`), text, tool calls, results, usage, timing |
-| `StopReason` | type     | `'finish' \| 'max_turns'`                                                                   |
-| `isComplete` | function | `result.stopReason === 'finish'`                                                            |
+| Export       | Kind     | Description                                                                                              |
+| ------------ | -------- | -------------------------------------------------------------------------------------------------------- |
+| `RunResult`  | type     | What `run()` resolves with. Includes `agentName` and `agentPath`                                         |
+| `RunStep`    | type     | One model call: `kind` (`turn`/`repair`/`resume`), `agentName`, text, tool calls, results, usage, timing |
+| `StopReason` | type     | `'finish' \| 'max_turns'`                                                                                |
+| `isComplete` | function | `result.stopReason === 'finish'`                                                                         |
 
 ### Streaming
 
@@ -117,6 +128,8 @@ See [Errors → Retries](/docs/errors#retries).
 | `ModelFallbackEvent`              | type     | `fromModelId`, `toModelId`, `index`, `error`             |
 | `OutputInvalidEvent`              | type     | `attempt`, `maxAttempts`, `issues`, `repairing`          |
 | `GuardrailTriggeredEvent`         | type     | `guardrail`, `stage`, `action`, `toolName?`, `reason?`   |
+| `HandoffStartEvent`               | type     | `from`, `to`, `toolName`, `reason?`, `carriedCount`      |
+| `HandoffRefusedEvent`             | type     | `from`, `to`, `cause`, `reason`                          |
 | `ApprovalRequiredEvent`           | type     | `turn`, `calls`                                          |
 | `ApprovalResolvedEvent`           | type     | `toolCallId`, `toolName`, `approved`, `reason?`          |
 | `SessionLoadEvent`                | type     | `sessionId`, `messageCount`, `droppedCount`, `truncated` |

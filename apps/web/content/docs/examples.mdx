@@ -3,9 +3,9 @@ title: Examples
 description: Runnable projects in the repository.
 ---
 
-All eight examples live in the
+All nine examples live in the
 [repository](https://github.com/KARDT89/just-another-sdk/tree/main/examples) and run
-against a real model — except the last, which is entirely offline. Clone it,
+against a real model — except the last two, which are entirely offline. Clone it,
 add a key, and go:
 
 ```bash
@@ -311,6 +311,39 @@ pnpm example:guardrails
 ```
 
 See [Guardrails](/docs/guardrails).
+
+## 9 — Handoffs
+
+```bash
+pnpm example:handoffs
+```
+
+**Also entirely offline.** A triage agent, two specialists, and the four things
+that make delegation safe:
+
+- Routing: triage transfers to billing, which uses **its own** model,
+  instructions, and tools — and `agentPath` shows the route.
+- A `filter` that hands over two messages instead of nine, while the transcript
+  and the session keep all nine.
+- Billing tries to hand the conversation straight back. The cycle is **refused**,
+  billing reads the refusal, and billing answers.
+- A tool guardrail requiring a person to approve the transfer, suspended,
+  serialized over a fake wire, and resumed.
+
+```text
+▶ run_msbpobom_r1evqt  triage · mock/triage
+  ↳ transfer_to_billing {"reason":"The user reports a duplicate charge in March."}
+    → {"transferred_to":"billing","reason":"…"} 0ms
+  ⇄ handoff triage → billing · 4 messages carried · The user reports a duplicate charge in March.
+  ↳ lookup_invoice {"month":"2026-03"}
+    → {"month":"2026-03","charges":2,"total":"$98.00"} 1ms
+✔ finish · 3 turns · 30 in / 15 out · 15ms · triage → billing
+
+   agentPath: triage → billing
+   who served each turn: triage, billing, billing
+```
+
+Three turns, one run, one usage total. See [Handoffs](/docs/handoffs).
 
 ## Patterns worth copying
 

@@ -30,6 +30,15 @@ export interface ConsoleTracerOptions {
  * ✔ finish · 2 turns · 412 in / 63 out · 1.9s
  * ```
  *
+ * A run that handed off shows the route:
+ *
+ * ```text
+ * ▶ run_m9x2k1p  triage · anthropic/claude-opus-5
+ *   ⇄ handoff triage → billing · 3 messages carried
+ *   ↳ lookup_invoice {"month":"2026-03"}  →  {"charges":2}  84ms
+ * ✔ finish · 3 turns · 612 in / 88 out · 2.4s · triage → billing
+ * ```
+ *
  * Tool inputs and outputs are redacted before printing, so a tool that handles
  * credentials does not leak them into your terminal or CI log.
  */
@@ -95,11 +104,29 @@ export function consoleTracer(options: ConsoleTracerOptions = {}): EventListener
         break
       }
 
+      case 'handoff.start': {
+        const why = event.reason ? paint('dim', ` · ${truncate(event.reason, maxLength)}`) : ''
+        write(
+          `  ${paint('cyan', '⇄')} handoff ${event.from} ${paint('dim', '→')} ${paint('cyan', event.to)} ${paint('dim', `· ${event.carriedCount} message${event.carriedCount === 1 ? '' : 's'} carried`)}${why}`,
+        )
+        break
+      }
+
+      case 'handoff.refused':
+        write(
+          `  ${paint('yellow', '⊘')} handoff ${event.from} ${paint('dim', '→')} ${event.to} ${paint('dim', `· refused (${event.cause})`)}`,
+        )
+        break
+
       case 'run.finish': {
         const mark = event.stopReason === 'finish' ? paint('green', '✔') : paint('yellow', '⚠')
         const usage = `${event.usage.inputTokens} in / ${event.usage.outputTokens} out`
+        // The route is printed only when there was one. A single-agent run
+        // showing "· triage" would be noise on every trace the SDK prints.
+        const route =
+          event.agentPath.length > 1 ? paint('dim', ` · ${event.agentPath.join(' → ')}`) : ''
         write(
-          `${mark} ${event.stopReason} ${paint('dim', `· ${event.turns} turn${event.turns === 1 ? '' : 's'} · ${usage} · ${formatDuration(event.durationMs)}`)}`,
+          `${mark} ${event.stopReason} ${paint('dim', `· ${event.turns} turn${event.turns === 1 ? '' : 's'} · ${usage} · ${formatDuration(event.durationMs)}`)}${route}`,
         )
         break
       }

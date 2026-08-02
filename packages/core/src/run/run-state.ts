@@ -3,6 +3,16 @@ import type { ModelMessage, Usage } from '../types/messages.js'
 import type { RunStep } from './result.js'
 
 /**
+ * What a caller supplies when recording a step.
+ *
+ * `kind` and `agentName` are filled in by the recording method rather than at
+ * the call site: the loop only ever produces turns, and the acting agent is
+ * something this object already knows. Passing either would be a chance to pass
+ * it wrong.
+ */
+type StepInput = Omit<RunStep, 'kind' | 'agentName'>
+
+/**
  * The mutable state of a single run.
  *
  * This is the *only* mutable object in the SDK's hot path, and it is created
@@ -22,10 +32,25 @@ export class RunState {
   private readonly messageLog: ModelMessage[]
   private readonly stepLog: RunStep[] = []
 
+  /**
+   * What the *model* sees, when that differs from the full log.
+   *
+   * `undefined` until a handoff with a `filter` narrows the context, which is
+   * the overwhelmingly common case — the default path allocates nothing and
+   * behaves exactly as it did before handoffs existed. Once set, `append` writes
+   * to both: the log is what gets persisted and returned, the view is what gets
+   * sent.
+   */
+  private viewLog: ModelMessage[] | undefined
+
   /** Completed model calls. `turn` in events is `turns + 1`. */
   private turnCount = 0
   private usageTotal: Usage = ZERO_USAGE
   private lastModelId: string
+
+  /** Every agent that has acted, in order. Append-only, like the message log. */
+  private readonly path: string[]
+  private handoffs = 0
 
   constructor(args: {
     runId: string
@@ -38,6 +63,41 @@ export class RunState {
     this.startedAt = Date.now()
     this.messageLog = [...args.messages]
     this.lastModelId = args.modelId
+    this.path = [args.agentName]
+  }
+
+  /** The agent currently acting. Changes when a handoff is accepted. */
+  get activeAgentName(): string {
+    return this.path[this.path.length - 1] ?? this.agentName
+  }
+
+  /** `['triage', 'billing']` — the route the run took. */
+  get agentPath(): readonly string[] {
+    return [...this.path]
+  }
+
+  /** Transfers accepted so far, checked against `maxHandoffs`. */
+  get handoffCount(): number {
+    return this.handoffs
+  }
+
+  /** True when this agent has already acted in this run — an `A → B → A` cycle. */
+  hasVisited(agentName: string): boolean {
+    return this.path.includes(agentName)
+  }
+
+  /**
+   * Records an accepted transfer, optionally narrowing what the receiving agent
+   * sees.
+   *
+   * `carried` replaces the **view**, never the log. A handoff must not be able
+   * to delete history: the session still persists everything, and
+   * `result.messages` still round-trips into a new run.
+   */
+  switchAgent(agentName: string, carried?: readonly ModelMessage[]): void {
+    this.path.push(agentName)
+    this.handoffs += 1
+    if (carried) this.viewLog = [...carried]
   }
 
   get turns(): number {
@@ -66,6 +126,21 @@ export class RunState {
     return [...this.messageLog]
   }
 
+  /**
+   * What the next model call should send.
+   *
+   * Identical to {@link messages} unless a handoff narrowed the context. Reading
+   * the two through different accessors is what keeps "the model sees less" and
+   * "the session stores everything" from being the same decision.
+   */
+  get view(): readonly ModelMessage[] {
+    return this.viewLog ? [...this.viewLog] : [...this.messageLog]
+  }
+
+  get viewCount(): number {
+    return (this.viewLog ?? this.messageLog).length
+  }
+
   get steps(): readonly RunStep[] {
     return [...this.stepLog]
   }
@@ -76,6 +151,7 @@ export class RunState {
 
   append(...messages: readonly ModelMessage[]): void {
     this.messageLog.push(...messages)
+    this.viewLog?.push(...messages)
   }
 
   /**
@@ -84,8 +160,8 @@ export class RunState {
    * `kind` is filled in here rather than at the call site so that the loop body
    * stays literal — the loop only ever produces turns.
    */
-  completeTurn(step: Omit<RunStep, 'kind'>): void {
-    this.stepLog.push({ ...step, kind: 'turn' })
+  completeTurn(step: StepInput): void {
+    this.stepLog.push({ ...step, kind: 'turn', agentName: this.activeAgentName })
     this.usageTotal = addUsage(this.usageTotal, step.usage)
     this.lastModelId = step.modelId
     this.turnCount += 1
@@ -99,8 +175,8 @@ export class RunState {
    * counting it would push `result.turns` past the `maxTurns` the config
    * promises. See {@link RunStep.kind}.
    */
-  completeRepair(step: Omit<RunStep, 'kind'>): void {
-    this.stepLog.push({ ...step, kind: 'repair' })
+  completeRepair(step: StepInput): void {
+    this.stepLog.push({ ...step, kind: 'repair', agentName: this.activeAgentName })
     this.usageTotal = addUsage(this.usageTotal, step.usage)
     this.lastModelId = step.modelId
   }
@@ -113,8 +189,8 @@ export class RunState {
    * generated, and `turnCount` is untouched because the calls belong to a turn
    * that happened in the run that suspended. See {@link RunStep.kind}.
    */
-  completeResume(step: Omit<RunStep, 'kind'>): void {
-    this.stepLog.push({ ...step, kind: 'resume' })
+  completeResume(step: StepInput): void {
+    this.stepLog.push({ ...step, kind: 'resume', agentName: this.activeAgentName })
   }
 
   /**
@@ -140,7 +216,16 @@ export class RunState {
       // Non-text parts are preserved: an assistant turn can carry tool calls
       // alongside its text, and dropping them would break the conversation.
       const rewritten = message.content.filter((part) => part.type !== 'text')
-      this.messageLog[i] = { ...message, content: [textPart(text), ...rewritten] }
+      const replacement: ModelMessage = { ...message, content: [textPart(text), ...rewritten] }
+      this.messageLog[i] = replacement
+
+      // The same message object is in the view when a handoff narrowed the
+      // context, and a repair reads the view. Patching by identity rather than
+      // by index because the two logs are not aligned after a filter.
+      if (this.viewLog) {
+        const viewIndex = this.viewLog.lastIndexOf(message)
+        if (viewIndex !== -1) this.viewLog[viewIndex] = replacement
+      }
 
       const stepIndex = this.stepLog.findLastIndex((step) => step.text.length > 0)
       const step = this.stepLog[stepIndex]

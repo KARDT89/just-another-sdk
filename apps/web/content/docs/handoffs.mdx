@@ -3,21 +3,14 @@ title: Handoffs
 description: Delegating between specialised agents without infinite loops.
 ---
 
-<Callout type="warn">
-  **Not shipped yet.** The runtime already carries the pieces a handoff needs —
-  agents are cheap immutable values, and events name the acting agent — so this
-  is additive.
-</Callout>
-
-## Intended API
-
-A handoff is modelled as a tool, because that is what it is from the model's point
-of view: a capability it can choose to invoke.
+One agent that knows everything is a prompt that knows nothing well. A handoff
+lets a cheap router decide _who_ should answer, and a specialist with its own
+instructions, tools, and model actually answer it.
 
 ```ts
 const billing = new Agent({
   name: 'billing',
-  instructions: 'You handle invoices and refunds.',
+  instructions: 'You handle invoices and refunds. Quote exact amounts.',
   model,
   tools: [lookupInvoice, issueRefund],
 })
@@ -41,63 +34,274 @@ const result = await triage.run('I was charged twice for March.')
 
 result.output // the billing agent's answer
 result.agentPath // ['triage', 'billing']
+result.agentName // 'billing' — who actually answered
 ```
 
-### Context transfer
+## A handoff is a tool
 
-By default the receiving agent gets the full conversation. A `filter` narrows it —
-useful when the specialist should not see everything, or when the transcript is
-long enough to cost real money:
+Each entry in `handoffs` becomes a `transfer_to_<name>` tool the model may call,
+which is what a transfer already is from the model's point of view: a capability
+it chooses to invoke.
+
+That is not an implementation detail, it is the reason everything below works
+without handoff-specific code. A transfer is validated, subject to the routing
+agent's [tool guardrails](/docs/guardrails), gateable behind human approval,
+bounded by the tool timeout, and visible in a trace — because every tool call is.
+
+The synthesized tool takes one optional `reason`, which the model uses to brief
+the specialist:
+
+```ts
+triage.toolNames // ['transfer_to_billing', 'transfer_to_technical']
+triage.handoffNames // ['billing', 'technical']
+```
+
+Rename it when two agents would collide, or when the default reads badly:
+
+```ts
+handoffs: [{ agent: billing, toolName: 'escalate_to_finance' }]
+```
+
+## One run, not two
+
+A handoff **swaps which agent the loop is running**. It does not start a nested
+run. So there is one `runId`, one `usage` total, one session save, and one
+`RunResult` — and `agentPath` is how you see that more than one agent was
+involved.
+
+```ts
+result.runId // one id for the whole chain
+result.usage // summed across every agent
+result.steps // each carries `agentName`
+result.agentPath // ['triage', 'billing']
+```
+
+This is also what makes `maxTurns` mean something: it is a budget for the **run**,
+shared across the chain, rather than a budget each agent gets a fresh copy of.
+
+<Callout>
+  Everything a single-agent run does still works unchanged — streaming,
+  sessions, resumable runs, structured output, retries, and fallbacks. A
+  streamed handoff is the same run with the same event ordering.
+</Callout>
+
+## Context transfer
+
+By default the receiving agent gets the whole conversation. A `filter` narrows
+it — useful when the specialist should not see everything, or when the transcript
+is long enough to cost real money:
 
 ```ts
 handoffs: [
   {
     agent: billing,
     filter: (messages) => messages.slice(-4),
-    // Optional: a briefing note from the routing agent
+    // A briefing note from the routing agent, in addition to the model's own reason.
     describe: 'The user reports a duplicate charge in March.',
   },
 ]
 ```
 
-### Loop prevention
+Two things a `filter` deliberately does **not** do:
 
-Three limits, because agents handing work back and forth is the obvious failure
-mode:
+- **It does not delete history.** `result.messages` and anything a session
+  persists stay complete. A filter narrows what the model is _shown_; letting it
+  narrow what is _stored_ would make delegation a way to erase a user's
+  conversation.
+- **It cannot produce an invalid conversation.** A slice that orphans a tool
+  result, or leaves a tool call unanswered, is a `400` at every provider. Those
+  are repaired by removal rather than thrown — a filter is a hint about what the
+  specialist needs, not a place to learn the message rules.
 
-- **A depth ceiling** (`maxHandoffs`, default 5) — the run stops with
-  `stopReason: 'max_handoffs'` rather than continuing.
-- **Cycle detection** — an A → B → A → B pattern is broken rather than followed.
-- **A shared turn budget** — `maxTurns` counts across the whole run, not per
-  agent, so a chain cannot multiply your bill.
+The briefing arrives as a `user` message, so it survives a filter that dropped
+the transfer itself:
 
-### Visibility
+```text
+[Handed off from "triage"] The user reports a duplicate charge in March.
+```
 
-Handoffs appear in the event stream, so a trace shows which agent did what:
+## Loop prevention
+
+Agents handing work back and forth is the obvious failure mode, so there are
+three limits — and **none of them ends the run**:
+
+| Limit             | What happens                                                      |
+| ----------------- | ----------------------------------------------------------------- |
+| `maxHandoffs` (5) | The transfer tool returns an error; the current agent must answer |
+| Cycle detection   | `A → B → A` is refused, with the route in the message             |
+| Shared `maxTurns` | Free — it is one run, so the chain cannot multiply your bill      |
+
+A refusal is a **tool result the model reads**, not a failure:
+
+```json
+{
+  "error": "\"triage\" has already handled this conversation (triage → billing), so transferring back would loop. Answer the user directly, or transfer to a different agent.",
+  "code": "handoff_refused"
+}
+```
+
+The model sees it, stops trying to delegate, and answers. `stopReason` is still
+`finish`.
+
+<Callout type="info">
+  **This is a change from what this page previously promised.** An earlier draft
+  committed to `stopReason: 'max_handoffs'`. Ending a run whose conversation is
+  perfectly valid — and whose current agent could have answered — throws work
+  away for no benefit, and it would have been the only `StopReason` meaning "a
+  policy fired" rather than "the model finished". Refusing the *call* keeps the
+  runtime's invariants intact: every exit path still sets a `stopReason`, and a
+  completed run still does not throw.
+</Callout>
+
+Like a guardrail rejection, a refusal carries no error on the outcome, so it does
+**not** trip `onToolError: 'throw'`. A routing policy is not a tool failure.
+
+Raise or lower the ceiling per agent or per run:
+
+```ts
+new Agent({ name: 'triage', model, handoffs: [billing], maxHandoffs: 2 })
+await triage.run(message, { maxHandoffs: 0 }) // no delegation this time
+```
+
+## Guardrails and approval
+
+Because the transfer is a tool call, the routing agent's `toolGuardrails` see it.
+Requiring a person to sign off on a delegation is therefore the same code as
+requiring one for a refund:
+
+```ts
+const triage = new Agent({
+  name: 'triage',
+  model,
+  handoffs: [billing],
+  toolGuardrails: [
+    {
+      name: 'confirm-delegation',
+      tools: ['transfer_to_billing'],
+      check: () => ({
+        requireApproval: true,
+        reason: 'A supervisor must approve this.',
+      }),
+    },
+  ],
+})
+
+try {
+  await triage.run('I was charged twice.')
+} catch (error) {
+  if (!(error instanceof ApprovalRequiredError)) throw error
+
+  const final = await triage.resumeApproval(
+    error.suspension,
+    error.suspension.pending.calls.map((call) => ({
+      toolCallId: call.toolCallId,
+      approved: true,
+    })),
+  )
+
+  final.agentPath // ['triage', 'billing'] — the approved transfer took effect
+}
+```
+
+An approved transfer is applied **before** the resumed run's first turn. Without
+that, the human says yes, the tool result says "transferred to billing", and
+triage answers the question it just delegated.
+
+Denying it leaves the routing agent holding the conversation, with a refusal it
+can explain to the user.
+
+<Callout type="warn">
+  A suspension carries messages, not counters, so `maxHandoffs` starts over on a
+  resumed run. Cycle detection is unaffected — it reads the route, which is
+  reconstructed from the conversation. This is a property of stateless approval
+  rather than a handoff-specific gap; see [Guardrails](/docs/guardrails) for the
+  full shape of that trade.
+</Callout>
+
+## Structured output
+
+The **initiating** agent's `outputSchema` governs the whole run, and a target's
+own is ignored:
+
+```ts
+const triage = new Agent({
+  name: 'triage',
+  model,
+  handoffs: [billing],
+  outputSchema: Ticket,
+})
+
+const result = await triage.run(email)
+result.output.severity // number — inferred, even though billing answered
+```
+
+`triage.run<Ticket>()` promising a `Ticket` and returning whatever the specialist
+happened to define would make `RunResult<T>` a lie. The schema _instruction_ does
+follow the acting agent, so the specialist is told the shape it has to produce.
+
+## Tracing
+
+A handoff emits `handoff.start` on the transition, and `handoff.refused` when a
+limit blocks one. `agentName` on every event is the agent that was acting when it
+was emitted, so a trace attributes work correctly without joining anything:
 
 ```ansi
 ▶ run_m9x2k1p  triage · anthropic/claude-opus-5
-  ⇄ handoff  triage → billing
+  ↳ transfer_to_billing {"reason":"Duplicate March charge."}
+    → {"transferred_to":"billing"} 0ms
+  ⇄ handoff triage → billing · 4 messages carried · Duplicate March charge.
   ↳ lookup_invoice {"month":"2026-03"}
     → {"charges":2,"total":"$98.00"} 84ms
-✔ finish · 3 turns · billing · 612 in / 88 out · 2.4s
+✔ finish · 3 turns · 612 in / 88 out · 2.4s · triage → billing
 ```
 
-## What works today
+There is deliberately **no `handoff.end`**. In a flat run a handoff is a
+transition, not a nested scope: the receiving agent holds the conversation until
+the run ends or transfers onward, so the only honest close is `run.finish` —
+which carries `agentPath`.
 
-Orchestrate in your own code. It is more verbose than a declarative handoff, but
-it is explicit, debuggable, and available now:
+## Building a graph
+
+Two agents that can reach each other cannot both be defined first. `withHandoffs`
+is the way out:
+
+```ts
+const triage = new Agent({ name: 'triage', instructions: '…', model })
+const billing = new Agent({ name: 'billing', model, handoffs: [triage] })
+
+const router = triage.withHandoffs(billing)
+```
+
+Resolution is lazy and memoized per run, so a target is only resolved if the run
+actually reaches it — a ten-agent graph costs the same as a one-agent run until
+someone transfers. A config-level cycle like the one above is harmless for the
+same reason; only a _runtime_ cycle is refused.
+
+## Orchestrating by hand
+
+Declarative handoffs are not the only option. An `Agent` is immutable
+configuration with no per-run state, so composing several yourself is cheap and
+safe under concurrency:
 
 ```ts
 const route = await triage.run(message, {
   toolChoice: { type: 'tool', name: 'classify' },
 })
-
-const category = /* read from route.steps[0].toolResults[0].output */
+const category = route.steps[0]?.toolResults[0]?.output
 const specialist = category === 'billing' ? billing : technical
 
 const result = await specialist.run(message, { messages: route.messages })
 ```
 
-Because an `Agent` is immutable configuration with no per-run state, creating and
-composing several of them is cheap and safe under concurrency.
+This gives you two `RunResult`s and full control of what crosses between them.
+Reach for it when the routing decision is yours rather than the model's.
+
+## Example
+
+[`examples/09-handoffs`](https://github.com/KARDT89/sylo-sdk/tree/main/examples/09-handoffs)
+runs all of this offline — routing, a narrowed handover, a refused cycle, and an
+approved transfer — with no API key:
+
+```bash
+pnpm example:handoffs
+```

@@ -39,6 +39,14 @@ export interface RunStep {
   readonly kind: 'turn' | 'repair' | 'resume'
   /** 1-based turn number within the run. */
   readonly turn: number
+  /**
+   * The agent that acted on this step.
+   *
+   * Constant for a run with no handoffs. After one, it is how a trace attributes
+   * a turn to the specialist that served it rather than to whoever started the
+   * run — `result.agentPath` is the summary, this is the detail.
+   */
+  readonly agentName: string
   /** Text the model produced this turn (may be empty on a pure tool turn). */
   readonly text: string
   readonly toolCalls: readonly ToolCallPart[]
@@ -64,7 +72,15 @@ export interface RunStep {
 export interface RunResult<TOutput = string> {
   /** Stable id for this run. Appears in every event and trace line. */
   readonly runId: string
+  /** The agent that produced the final answer — the last entry of `agentPath`. */
   readonly agentName: string
+  /**
+   * Every agent that acted, in order: `['triage', 'billing']`.
+   *
+   * Always at least one entry, so a run with no handoffs needs no special case.
+   * The first is the agent you called; the last is the one that answered.
+   */
+  readonly agentPath: readonly string[]
   /** The final answer — a string, or a parsed object once structured output lands. */
   readonly output: TOutput
   /** Raw final assistant text, always present even for typed output. */

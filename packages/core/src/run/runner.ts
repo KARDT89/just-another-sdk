@@ -16,14 +16,33 @@ import {
 import { EventEmitter } from '../events/emitter.js'
 import { applyInputGuardrails, applyOutputGuardrails } from '../guardrails/apply.js'
 import type { ApprovalDecision } from '../guardrails/types.js'
+import {
+  briefing,
+  handoffTools,
+  refusalResult,
+  repairPairing,
+  resolveHandoffs,
+} from '../handoffs/handoff.js'
+import type { HandoffRefusal, ResolvedHandoff } from '../handoffs/types.js'
 import { toolCallsOf, textOf } from '../providers/provider.js'
-import type { ModelProvider, ModelRequest, ModelResponse } from '../providers/provider.js'
+import type {
+  ModelProvider,
+  ModelRequest,
+  ModelResponse,
+  ToolChoice,
+  ToolDefinition,
+} from '../providers/provider.js'
 import { validate } from '../schema/standard-schema.js'
 import { defaultSessionStore } from '../sessions/memory.js'
 import type { SessionStore } from '../sessions/store.js'
 import { applySummary, summarizeMessages, type SummarizeOptions } from '../sessions/summarize.js'
 import { trimHistory, type ContextPolicy } from '../sessions/trim.js'
-import { ApprovalPending, executeToolCalls, type ToolGate } from '../tools/execute.js'
+import {
+  ApprovalPending,
+  executeToolCalls,
+  type ToolCallOutcome,
+  type ToolGate,
+} from '../tools/execute.js'
 import { ToolRegistry } from '../tools/registry.js'
 import {
   assistantMessage,
@@ -131,14 +150,20 @@ export async function executeRun<TOutput = string>(
   options: RunOptions,
   internals: RunInternals,
 ): Promise<RunResult<TOutput>> {
-  const registry = new ToolRegistry(config.tools)
   const maxTurns = options.maxTurns ?? config.maxTurns ?? AGENT_DEFAULTS.maxTurns
-  const onToolError = config.onToolError ?? AGENT_DEFAULTS.onToolError
+  const maxHandoffs = options.maxHandoffs ?? config.maxHandoffs ?? AGENT_DEFAULTS.maxHandoffs
 
   const runId = internals.runId ?? options.runId ?? createRunId()
   const events = new EventEmitter(options.onEvent)
 
-  const instructions = await resolveInstructions(config)
+  // Every agent-derived value now goes through here rather than being hoisted,
+  // because a handoff changes which agent the loop is running. Resolution is
+  // memoized per config and *lazy*, so a five-agent graph costs nothing until
+  // the run reaches a given agent — and a config-level cycle (A lists B, B lists
+  // A) is harmless, since nothing walks the graph ahead of time.
+  const resolveAgent = createAgentResolver(options)
+  let active = await resolveAgent(config)
+
   const session = resolveSession(config, options)
 
   // One controller for the whole run: the caller's signal and the overall
@@ -151,7 +176,7 @@ export async function executeRun<TOutput = string>(
     agentName: config.name,
     modelId: config.model.modelId,
     input: typeof input === 'string' ? input : '(messages)',
-    toolNames: registry.names(),
+    toolNames: active.registry.names(),
   })
 
   // Loading happens after `run.start` so that event is always first, and in its
@@ -187,62 +212,58 @@ export async function executeRun<TOutput = string>(
     messages: [...history, ...(internals.replay ?? []), ...turnMessages],
   })
 
-  const toolDefinitions = await registry.definitions()
-
-  // Resolved beside the tool definitions and for the same reason: the first
-  // derivation can pay for a dynamic `import('zod')`, and neither the schema nor
-  // its instruction changes between turns.
+  // Run-scoped, deliberately **not** per agent. `outputSchema` is a promise the
+  // *caller* made — `triage.run<Ticket>()` must return a `Ticket` no matter
+  // which specialist ends up answering — so the initiating agent's schema
+  // governs and a handoff target's own is ignored. Its instruction is joined
+  // onto whichever agent is acting, so the specialist still knows the shape.
   const output = await resolveOutput(config, options)
 
-  // The schema instruction is layered on top of the developer's prompt rather
-  // than merged into the request, so `result.messages` carries exactly what the
-  // model saw. `resolveInstructions` stays the developer's prompt alone — a
-  // function instruction is still called exactly once, and an agent with no
-  // instructions still gets a system message here rather than losing the schema.
-  const system = output ? joinInstructions(instructions, output.instruction) : instructions
-
-  // Hoisted so the loop body stays literal. With an `outputSchema` the model's
-  // only text *is* the JSON object, and half an object is not something any UI
-  // can render — the same reasoning that withholds partial tool arguments and
-  // keeps `model.request` out of the browser. The transport still streams; the
-  // event is what we withhold.
+  // With an `outputSchema` the model's only text *is* the JSON object, and half
+  // an object is not something any UI can render — the same reasoning that
+  // withholds partial tool arguments and keeps `model.request` out of the
+  // browser. The transport still streams; the event is what we withhold.
   const emitTextDelta = output
     ? () => {}
     : (turn: number, delta: string) => {
-        events.emit({ type: 'text.delta', runId, agentName: config.name, turn, delta })
+        events.emit({ type: 'text.delta', runId, agentName: state.activeAgentName, turn, delta })
       }
 
-  // Hoisted for the same reason. `undefined` when the agent has no tool
-  // guardrails, which is what keeps `executeToolCalls` on exactly the path it
-  // took before this step existed.
-  const makeGate = buildGateFactory({ config, state, events, runId, signal })
-
-  // Resolved once: these do not change between turns, and rebuilding them per
-  // turn would be pure waste in the hottest part of the loop.
-  const toolChoice = options.toolChoice ?? config.toolChoice
-  const metadata = mergeMetadata(config, options)
-  const modelTimeoutMs = config.modelTimeoutMs ?? AGENT_DEFAULTS.modelTimeoutMs
-
-  // The chain is rebuilt from the primary at the start of every turn, so a
-  // transient outage cannot permanently demote the preferred model.
-  const providers = [config.model, ...(config.fallbacks ?? [])]
-  const retryPolicy = resolveRetryPolicy(config, options)
+  // Closed over the run's state and emitter once; the acting agent and the turn
+  // are what vary, so they are arguments.
+  const makeGate = buildGateFactory({ state, events, runId, signal })
 
   try {
     // Settles tool calls carried over from a suspended run, so the loop below
     // starts against a complete conversation. A no-op unless `approvals` were
     // passed. Inside the try so a re-suspension takes the same path as the
     // original one.
-    await settleApprovals({
-      config,
+    const resumed = await settleApprovals({
+      active,
       state,
       events,
       runId,
       signal,
-      registry,
+      maxHandoffs,
       makeGate,
       approvals: options.approvals,
     })
+
+    // An approved transfer must take effect *before* the first turn. Without
+    // this the human said yes, the tool result says "transferred to billing",
+    // and triage — still holding the conversation — answers the question it
+    // just delegated.
+    if (resumed) {
+      active = await applyHandoff({
+        accepted: resumed,
+        active,
+        state,
+        resolveAgent,
+        events,
+        runId,
+        turn: 0,
+      })
+    }
 
     let stopReason: StopReason = 'max_turns'
 
@@ -251,37 +272,41 @@ export async function executeRun<TOutput = string>(
 
       const turn = state.currentTurn
       const turnStartedAt = Date.now()
+      const acting = active
+      const system = systemOf(acting, output)
 
       const request: ModelRequest = {
-        messages: state.messages,
+        messages: state.view,
         ...(system ? { system } : {}),
-        ...(toolDefinitions ? { tools: toolDefinitions } : {}),
-        ...(toolChoice !== undefined ? { toolChoice } : {}),
+        ...(acting.toolDefinitions ? { tools: acting.toolDefinitions } : {}),
+        ...(acting.toolChoice !== undefined ? { toolChoice: acting.toolChoice } : {}),
         ...(output ? { responseFormat: output.responseFormat } : {}),
-        ...(config.maxOutputTokens !== undefined
-          ? { maxOutputTokens: config.maxOutputTokens }
+        ...(acting.config.maxOutputTokens !== undefined
+          ? { maxOutputTokens: acting.config.maxOutputTokens }
           : {}),
-        ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-        ...(metadata ? { metadata } : {}),
+        ...(acting.config.temperature !== undefined
+          ? { temperature: acting.config.temperature }
+          : {}),
+        ...(acting.metadata ? { metadata: acting.metadata } : {}),
       }
 
       events.emit({
         type: 'model.request',
         runId,
-        agentName: config.name,
+        agentName: acting.name,
         turn,
-        modelId: config.model.modelId,
-        messageCount: state.messageCount,
-        tools: toolDefinitions ?? [],
+        modelId: acting.config.model.modelId,
+        messageCount: state.viewCount,
+        tools: acting.toolDefinitions ?? [],
       })
 
       const modelStartedAt = Date.now()
       const outcome = await callModel({
-        providers,
+        providers: acting.providers,
         request,
         signal,
-        timeoutMs: modelTimeoutMs,
-        retry: retryPolicy,
+        timeoutMs: acting.modelTimeoutMs,
+        retry: acting.retryPolicy,
         streaming: internals.streaming,
         onTextDelta: (delta) => {
           emitTextDelta(turn, delta)
@@ -290,7 +315,7 @@ export async function executeRun<TOutput = string>(
           events.emit({
             type: 'model.retry',
             runId,
-            agentName: config.name,
+            agentName: acting.name,
             turn,
             modelId: info.provider.modelId,
             providerId: info.provider.providerId,
@@ -305,7 +330,7 @@ export async function executeRun<TOutput = string>(
           events.emit({
             type: 'model.fallback',
             runId,
-            agentName: config.name,
+            agentName: acting.name,
             turn,
             fromModelId: info.from.modelId,
             fromProviderId: info.from.providerId,
@@ -331,7 +356,7 @@ export async function executeRun<TOutput = string>(
       events.emit({
         type: 'model.response',
         runId,
-        agentName: config.name,
+        agentName: acting.name,
         turn,
         modelId: response.modelId,
         text,
@@ -361,7 +386,7 @@ export async function executeRun<TOutput = string>(
         events.emit({
           type: 'tool.start',
           runId,
-          agentName: config.name,
+          agentName: acting.name,
           turn,
           toolName: call.toolName,
           toolCallId: call.toolCallId,
@@ -369,21 +394,30 @@ export async function executeRun<TOutput = string>(
         })
       }
 
-      const outcomes = await executeToolCalls(toolCalls, {
-        registry,
+      const gate = makeGate(acting, turn)
+      const executed = await executeToolCalls(toolCalls, {
+        registry: acting.registry,
         runId,
-        agentName: config.name,
+        agentName: acting.name,
         turn,
-        defaultTimeoutMs: config.toolTimeoutMs ?? AGENT_DEFAULTS.toolTimeoutMs,
+        defaultTimeoutMs: acting.toolTimeoutMs,
         signal,
-        ...(makeGate ? { gate: makeGate(turn) } : {}),
+        ...(gate ? { gate } : {}),
       })
+
+      // Decided *before* the results are emitted and appended, so a refused
+      // transfer is reported once — as the tool result the model actually
+      // receives — rather than as a success the trace then contradicts. The
+      // transfer tool has no side effect, so deciding after it "ran" costs
+      // nothing and keeps the limit checks out of tool execution.
+      const decided = decideHandoff({ active: acting, state, maxHandoffs, outcomes: executed })
+      const outcomes = decided.outcomes
 
       for (const outcome of outcomes) {
         events.emit({
           type: 'tool.end',
           runId,
-          agentName: config.name,
+          agentName: acting.name,
           turn,
           toolName: outcome.result.toolName,
           toolCallId: outcome.result.toolCallId,
@@ -393,9 +427,26 @@ export async function executeRun<TOutput = string>(
         })
       }
 
+      for (const refusal of decided.refused) {
+        events.emit({
+          type: 'handoff.refused',
+          runId,
+          agentName: acting.name,
+          turn,
+          from: acting.name,
+          to: refusal.to,
+          toolName: refusal.toolName,
+          toolCallId: refusal.toolCallId,
+          cause: refusal.cause,
+          reason: refusal.reason,
+        })
+      }
+
       const results: ToolResultPart[] = outcomes.map((outcome) => outcome.result)
       state.append(toolMessage(results))
 
+      // Recorded against the agent that made the calls, which is still the
+      // acting one — the switch below is what changes that.
       state.completeTurn({
         turn,
         text,
@@ -411,9 +462,24 @@ export async function executeRun<TOutput = string>(
       const aborted = outcomes.find((outcome) => outcome.error?.code === 'aborted')
       if (aborted?.error) throw aborted.error
 
-      if (onToolError === 'throw') {
+      if (acting.onToolError === 'throw') {
         const failure = outcomes.find((outcome) => outcome.error !== undefined)
         if (failure?.error) throw failure.error
+      }
+
+      // Last thing in the turn: the conversation and the step belong to the
+      // agent that just acted, and everything from the next iteration on belongs
+      // to the one taking over.
+      if (decided.accepted) {
+        active = await applyHandoff({
+          accepted: decided.accepted,
+          active: acting,
+          state,
+          resolveAgent,
+          events,
+          runId,
+          turn,
+        })
       }
     }
 
@@ -429,15 +495,10 @@ export async function executeRun<TOutput = string>(
       ? await finalizeOutput({
           output,
           state,
-          config,
+          active,
           events,
           runId,
           signal,
-          providers,
-          retryPolicy,
-          modelTimeoutMs,
-          system,
-          metadata,
         })
       : undefined
 
@@ -464,29 +525,33 @@ export async function executeRun<TOutput = string>(
     // `max_turns` is a completion — the conversation is valid, just unfinished.
     if (session) {
       const savedAt = Date.now()
+      // `state.messages`, never `state.view`: a handoff `filter` narrows what a
+      // specialist is *shown*, and letting it narrow what is *stored* would make
+      // delegation a way to delete a user's history.
       const produced = state.messages.slice(history.length)
       await session.store.append(session.sessionId, produced)
       events.emit({
         type: 'session.save',
         runId,
-        agentName: config.name,
+        agentName: state.activeAgentName,
         sessionId: session.sessionId,
         appendedCount: produced.length,
         durationMs: Date.now() - savedAt,
       })
     }
 
-    const result = buildResult<TOutput>(state, config, stopReason, system, guarded)
+    const result = buildResult<TOutput>(state, stopReason, systemOf(active, output), guarded)
 
     events.emit({
       type: 'run.finish',
       runId,
-      agentName: config.name,
+      agentName: result.agentName,
       stopReason,
       text: result.text,
       turns: result.turns,
       usage: result.usage,
       durationMs: result.durationMs,
+      agentPath: result.agentPath,
     })
 
     return result
@@ -503,12 +568,11 @@ export async function executeRun<TOutput = string>(
       cause instanceof ApprovalPending
         ? suspend({
             cause,
-            config,
             state,
             events,
             runId,
             session,
-            system,
+            system: systemOf(active, output),
             historyLength: history.length,
           })
         : toAgentError(cause)
@@ -516,7 +580,7 @@ export async function executeRun<TOutput = string>(
     events.emit({
       type: 'run.error',
       runId,
-      agentName: config.name,
+      agentName: state.activeAgentName,
       error,
       turn: state.currentTurn,
     })
@@ -525,6 +589,276 @@ export async function executeRun<TOutput = string>(
   } finally {
     dispose()
   }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The acting agent                                                          */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Everything the loop needs from whichever agent is currently holding the
+ * conversation.
+ *
+ * Before handoffs these were a dozen `const`s above the loop. They are grouped
+ * here for one reason: after a handoff they all change together, and a loop that
+ * reads nine variables which must be swapped in lockstep is a loop with nine
+ * chances to swap eight of them.
+ *
+ * @internal
+ */
+interface ActiveAgent {
+  readonly config: AgentConfig<unknown>
+  readonly name: string
+  /** The agent's own tools **plus** a `transfer_to_*` tool per handoff target. */
+  readonly registry: ToolRegistry
+  readonly toolDefinitions: readonly ToolDefinition[] | undefined
+  /** The developer's prompt alone. The schema instruction is added per request. */
+  readonly instructions: string | undefined
+  readonly providers: readonly ModelProvider[]
+  /** Transfer tool name → target. Empty for an agent with no handoffs. */
+  readonly handoffs: ReadonlyMap<string, ResolvedHandoff>
+  readonly toolChoice: ToolChoice | undefined
+  readonly metadata: Readonly<Record<string, string>> | undefined
+  readonly modelTimeoutMs: number
+  readonly toolTimeoutMs: number
+  readonly onToolError: 'return' | 'throw'
+  readonly retryPolicy: ResolvedRetryPolicy
+}
+
+type AgentResolver = (config: AgentConfig<unknown>) => Promise<ActiveAgent>
+
+/**
+ * Builds the per-run, memoized resolver.
+ *
+ * Memoized on the config object, so an agent reached twice in one run — legal,
+ * as long as it is not a cycle — resolves once. Lazy, so the cost of a handoff
+ * target (an instructions thunk, a JSON Schema conversion, possibly a dynamic
+ * `import`) is paid only if the run actually gets there.
+ *
+ * Run options are folded in here rather than at the call site: `maxRetries`,
+ * `toolChoice`, and `metadata` are per *run*, so they apply to every agent the
+ * run passes through, not just the one it started with.
+ */
+function createAgentResolver(options: RunOptions): AgentResolver {
+  const cache = new Map<AgentConfig<unknown>, Promise<ActiveAgent>>()
+
+  const build = async (config: AgentConfig<unknown>): Promise<ActiveAgent> => {
+    const handoffs = resolveHandoffs(config.handoffs, {
+      name: config.name,
+      toolNames: (config.tools ?? []).map((t) => t.name),
+    })
+
+    const registry = new ToolRegistry([...(config.tools ?? []), ...handoffTools(handoffs)])
+
+    return {
+      config,
+      name: config.name,
+      registry,
+      toolDefinitions: await registry.definitions(),
+      instructions: await resolveInstructions(config),
+      // Rebuilt from the primary at the start of every turn, so a transient
+      // outage cannot permanently demote the preferred model.
+      providers: [config.model, ...(config.fallbacks ?? [])],
+      handoffs,
+      toolChoice: options.toolChoice ?? config.toolChoice,
+      metadata: mergeMetadata(config, options),
+      modelTimeoutMs: config.modelTimeoutMs ?? AGENT_DEFAULTS.modelTimeoutMs,
+      toolTimeoutMs: config.toolTimeoutMs ?? AGENT_DEFAULTS.toolTimeoutMs,
+      onToolError: config.onToolError ?? AGENT_DEFAULTS.onToolError,
+      retryPolicy: resolveRetryPolicy(config, options),
+    }
+  }
+
+  return (config) => {
+    const cached = cache.get(config)
+    if (cached) return cached
+
+    const pending = build(config)
+    cache.set(config, pending)
+    return pending
+  }
+}
+
+/**
+ * The system prompt in force: the acting agent's own, plus the run's schema
+ * instruction when there is one.
+ *
+ * The instruction is layered on rather than merged into the request so that
+ * `result.messages` carries exactly what the model saw. It follows the *acting*
+ * agent across a handoff because the schema is the run's contract — a specialist
+ * that inherits the obligation to produce a `Ticket` has to be told the shape.
+ */
+function systemOf(active: ActiveAgent, output: ResolvedOutput | undefined): string | undefined {
+  return output ? joinInstructions(active.instructions, output.instruction) : active.instructions
+}
+
+/* ------------------------------------------------------------------------- */
+/* Handoffs                                                                  */
+/* ------------------------------------------------------------------------- */
+
+/** A transfer that passed every limit and is about to happen. */
+interface AcceptedHandoff {
+  readonly resolved: ResolvedHandoff
+  /** The call that asked for it, so the trace can be correlated to the turn. */
+  readonly toolCallId: string
+  /** What the model said when it called the transfer tool, if anything. */
+  readonly reason: string | undefined
+}
+
+interface RefusedHandoff {
+  readonly to: string
+  readonly toolName: string
+  readonly toolCallId: string
+  readonly cause: HandoffRefusal
+  readonly reason: string
+}
+
+/**
+ * Decides what a turn's transfer calls are allowed to do.
+ *
+ * Three limits, and **none of them ends the run.** A refusal becomes an error
+ * result the model reads — "you cannot transfer, answer this yourself" — which
+ * is why handoffs added no `StopReason` and did not touch invariants 1 or 2. A
+ * model that ignores the refusal and keeps trying is bounded by `maxTurns`,
+ * which is shared across the whole chain because there is only ever one run.
+ *
+ * The refusal deliberately carries **no `error`** on the outcome, mirroring
+ * `blockedBy`: the runner throws on any `outcome.error` under
+ * `onToolError: 'throw'`, and a routing policy is not a tool failure.
+ */
+function decideHandoff(args: {
+  active: ActiveAgent
+  state: RunState
+  maxHandoffs: number
+  outcomes: readonly ToolCallOutcome[]
+}): {
+  outcomes: readonly ToolCallOutcome[]
+  accepted: AcceptedHandoff | undefined
+  refused: readonly RefusedHandoff[]
+} {
+  const { active, state, maxHandoffs, outcomes } = args
+
+  if (active.handoffs.size === 0) return { outcomes, accepted: undefined, refused: [] }
+
+  let accepted: AcceptedHandoff | undefined
+  const refused: RefusedHandoff[] = []
+
+  const rewritten = outcomes.map((outcome) => {
+    const resolved = active.handoffs.get(outcome.result.toolName)
+    if (!resolved) return outcome
+
+    // A transfer a guardrail rejected, or one that failed on its way through
+    // tool execution, never happened. Leave the outcome exactly as it is.
+    if (outcome.result.isError === true || outcome.blockedBy) return outcome
+
+    const to = resolved.config.name
+    const call = { toolCallId: outcome.result.toolCallId, toolName: outcome.result.toolName }
+
+    const refuse = (cause: HandoffRefusal, reason: string): ToolCallOutcome => {
+      refused.push({ to, ...call, cause, reason })
+      return { ...outcome, result: refusalResult(call, reason) }
+    }
+
+    // The model emitted two transfers in one turn. It cannot have both, and
+    // picking the first is the only choice that does not depend on which
+    // promise settled first.
+    if (accepted) {
+      return refuse(
+        'already_transferring',
+        `This conversation is already being transferred to "${accepted.resolved.config.name}". ` +
+          'Only one transfer can happen per turn.',
+      )
+    }
+
+    if (state.handoffCount >= maxHandoffs) {
+      return refuse(
+        'max_handoffs',
+        `This conversation has already been transferred ${state.handoffCount} times, which is the limit. ` +
+          'Answer the user directly with the information you have.',
+      )
+    }
+
+    // A → B → A. The second A would see the same conversation that made it hand
+    // off in the first place, so following it is how a routing graph becomes an
+    // infinite loop that bills by the token.
+    if (state.hasVisited(to)) {
+      return refuse(
+        'cycle',
+        `"${to}" has already handled this conversation (${state.agentPath.join(' → ')}), so transferring back would loop. ` +
+          'Answer the user directly, or transfer to a different agent.',
+      )
+    }
+
+    accepted = {
+      resolved,
+      toolCallId: outcome.result.toolCallId,
+      reason: reasonOf(outcome.result.output),
+    }
+    return outcome
+  })
+
+  return { outcomes: rewritten, accepted, refused }
+}
+
+/**
+ * Performs an accepted transfer and returns the agent now holding the run.
+ *
+ * Called at the very end of a turn, after the tool results are appended and the
+ * step is recorded — so the conversation and the trace attribute the transfer to
+ * the agent that asked for it, and everything after belongs to the one taking
+ * over.
+ */
+async function applyHandoff(args: {
+  accepted: AcceptedHandoff
+  active: ActiveAgent
+  state: RunState
+  resolveAgent: AgentResolver
+  events: EventEmitter
+  runId: string
+  turn: number
+}): Promise<ActiveAgent> {
+  const { accepted, active, state, resolveAgent, events, runId, turn } = args
+  const { resolved, reason } = accepted
+
+  const next = await resolveAgent(resolved.config)
+
+  // Applied to the full log, then repaired: a developer's slice can easily
+  // orphan a tool result or leave a tool call unanswered, and either shape is a
+  // 400 at every provider. Repairing beats throwing — a filter is a hint about
+  // what the specialist needs, not a place to learn the message rules.
+  const carried = resolved.filter ? repairPairing(resolved.filter(state.messages)) : undefined
+
+  state.switchAgent(next.name, carried)
+
+  // Appended *after* the switch so it lands in both logs, and as a `user`
+  // message so it survives a filter that dropped the transfer itself. A
+  // specialist that cannot see why it was called is a specialist guessing.
+  const note = briefing({ from: active.name, resolved, reason })
+  if (note) state.append(userMessage(note))
+
+  events.emit({
+    type: 'handoff.start',
+    runId,
+    // The transition belongs to the agent giving the conversation up; every
+    // event after this one carries the receiver's name.
+    agentName: active.name,
+    turn,
+    from: active.name,
+    to: next.name,
+    toolName: resolved.toolName,
+    toolCallId: accepted.toolCallId,
+    ...(reason !== undefined ? { reason } : {}),
+    carriedCount: state.viewCount,
+  })
+
+  return next
+}
+
+/** The `reason` the transfer tool echoed back, if the model supplied one. */
+function reasonOf(output: unknown): string | undefined {
+  if (typeof output !== 'object' || output === null) return undefined
+  const reason = (output as { reason?: unknown }).reason
+  return typeof reason === 'string' && reason.length > 0 ? reason : undefined
 }
 
 /* ------------------------------------------------------------------------- */
@@ -576,48 +910,58 @@ async function guardInput(args: {
 }
 
 /**
- * Builds the per-turn {@link ToolGate}, or `undefined` when there is nothing to
- * gate.
+ * Builds the {@link ToolGate} for one turn of one agent, or `undefined` when
+ * that agent has nothing to gate.
  *
- * A factory rather than a value because the context carries the turn number and
- * the conversation as it stands, both of which change every turn — but the
- * guardrails and the emitter do not, so the closure is built once.
+ * Per agent as well as per turn, because after a handoff the guardrails in force
+ * are the receiving agent's. That is also what makes a **transfer** gateable
+ * with no special case: the `transfer_to_*` tool is registered on the routing
+ * agent, so the routing agent's `toolGuardrails` see it exactly like any other
+ * call, and `requireApproval` on it puts a human in front of the delegation.
+ *
+ * `undefined` for an agent with no tool guardrails is what keeps
+ * `executeToolCalls` on exactly the path it took before guardrails existed.
  */
 function buildGateFactory(args: {
-  config: AgentConfig<unknown>
   state: RunState
   events: EventEmitter
   runId: string
   signal: AbortSignal
-}): ((turn: number) => ToolGate) | undefined {
-  const { config, state, events, runId, signal } = args
-  const guardrails = config.toolGuardrails
-  if (!guardrails || guardrails.length === 0) return undefined
+}): (active: ActiveAgent, turn: number) => ToolGate | undefined {
+  const { state, events, runId, signal } = args
 
-  return (turn: number) => ({
-    guardrails,
-    context: {
-      runId,
-      agentName: config.name,
-      turn,
-      messages: state.messages,
-      signal,
-    },
-    onTriggered: (event) => {
-      events.emit({
-        type: 'guardrail.triggered',
+  return (active: ActiveAgent, turn: number) => {
+    const guardrails = active.config.toolGuardrails
+    if (!guardrails || guardrails.length === 0) return undefined
+
+    return {
+      guardrails,
+      context: {
         runId,
-        agentName: config.name,
+        agentName: active.name,
         turn,
-        stage: 'tool',
-        guardrail: event.guardrail,
-        action: event.action,
-        toolName: event.toolName,
-        toolCallId: event.toolCallId,
-        ...(event.reason !== undefined ? { reason: event.reason } : {}),
-      })
-    },
-  })
+        // The full conversation, not the narrowed view: a guardrail deciding
+        // whether an action is safe must see everything that happened, even the
+        // part a handoff filter hid from the model.
+        messages: state.messages,
+        signal,
+      },
+      onTriggered: (event) => {
+        events.emit({
+          type: 'guardrail.triggered',
+          runId,
+          agentName: active.name,
+          turn,
+          stage: 'tool',
+          guardrail: event.guardrail,
+          action: event.action,
+          toolName: event.toolName,
+          toolCallId: event.toolCallId,
+          ...(event.reason !== undefined ? { reason: event.reason } : {}),
+        })
+      },
+    }
+  }
 }
 
 /**
@@ -635,21 +979,27 @@ function buildGateFactory(args: {
  * outright still rejects it. And only this function reads `options.approvals` —
  * the in-loop gate never does, which is what makes an approval authorise one
  * call once rather than becoming standing permission for the rest of the run.
+ *
+ * Returns the transfer to perform when the approved call was a **handoff**. It
+ * is returned rather than applied here so that both this prologue and the loop
+ * take the same code path into {@link applyHandoff}.
  */
 async function settleApprovals(args: {
-  config: AgentConfig<unknown>
+  active: ActiveAgent
   state: RunState
   events: EventEmitter
   runId: string
   signal: AbortSignal
-  registry: ToolRegistry
-  makeGate: ((turn: number) => ToolGate) | undefined
+  maxHandoffs: number
+  makeGate: (active: ActiveAgent, turn: number) => ToolGate | undefined
   approvals: readonly ApprovalDecision[] | undefined
-}): Promise<void> {
-  const { config, state, events, runId, signal, registry, makeGate, approvals } = args
+}): Promise<AcceptedHandoff | undefined> {
+  const { active, state, events, runId, signal, maxHandoffs, makeGate, approvals } = args
+  const config = active.config
+  const registry = active.registry
 
   const outstanding = outstandingToolCalls(state.messages)
-  if (outstanding.length === 0) return
+  if (outstanding.length === 0) return undefined
 
   const decisions = new Map((approvals ?? []).map((decision) => [decision.toolCallId, decision]))
 
@@ -715,18 +1065,29 @@ async function settleApprovals(args: {
   const deniedIds = new Set(denied.map((result) => result.toolCallId))
   const attempt = outstanding.filter((call) => !deniedIds.has(call.toolCallId))
 
-  const outcomes =
+  const gate = makeGate(active, 0)
+  const executed =
     attempt.length > 0
       ? await executeToolCalls(attempt, {
           registry,
           runId,
           agentName: config.name,
           turn: 0,
-          defaultTimeoutMs: config.toolTimeoutMs ?? AGENT_DEFAULTS.toolTimeoutMs,
+          defaultTimeoutMs: active.toolTimeoutMs,
           signal,
-          ...(makeGate ? { gate: approvedGate(makeGate(0), approvedIds) } : {}),
+          ...(gate ? { gate: approvedGate(gate, approvedIds) } : {}),
         })
       : []
+
+  // The same limits the loop applies, applied to a transfer a human approved.
+  // An approval says "yes, delegate this" — it does not say "and ignore the
+  // cycle you were about to make".
+  //
+  // The depth counter is necessarily 0 here: a suspension carries messages, not
+  // counters, so a resumed run starts its budget over. That is a property of
+  // stateless approval rather than an oversight — see the docs.
+  const decided = decideHandoff({ active, state, maxHandoffs, outcomes: executed })
+  const outcomes = decided.outcomes
 
   for (const outcome of outcomes) {
     events.emit({
@@ -739,6 +1100,21 @@ async function settleApprovals(args: {
       result: outcome.result,
       isError: outcome.result.isError === true,
       durationMs: outcome.durationMs,
+    })
+  }
+
+  for (const refusal of decided.refused) {
+    events.emit({
+      type: 'handoff.refused',
+      runId,
+      agentName: config.name,
+      turn: 0,
+      from: config.name,
+      to: refusal.to,
+      toolName: refusal.toolName,
+      toolCallId: refusal.toolCallId,
+      cause: refusal.cause,
+      reason: refusal.reason,
     })
   }
 
@@ -761,6 +1137,8 @@ async function settleApprovals(args: {
     durationMs: Date.now() - startedAt,
     modelId: state.modelId,
   })
+
+  return decided.accepted
 }
 
 /**
@@ -811,7 +1189,6 @@ function outstandingToolCalls(messages: readonly ModelMessage[]): readonly ToolC
  */
 function suspend(args: {
   cause: ApprovalPending
-  config: AgentConfig<unknown>
   state: RunState
   events: EventEmitter
   runId: string
@@ -819,13 +1196,14 @@ function suspend(args: {
   system: string | undefined
   historyLength: number
 }): ApprovalRequiredError {
-  const { cause, config, state, events, runId, session, system, historyLength } = args
+  const { cause, state, events, runId, session, system, historyLength } = args
   const turn = state.currentTurn
+  const agentName = state.activeAgentName
 
   events.emit({
     type: 'approval.required',
     runId,
-    agentName: config.name,
+    agentName,
     turn,
     calls: cause.calls,
   })
@@ -838,7 +1216,7 @@ function suspend(args: {
 
   return new ApprovalRequiredError({
     runId,
-    agentName: config.name,
+    agentName,
     messages,
     produced: state.messages.slice(historyLength),
     ...(session ? { sessionId: session.sessionId } : {}),
@@ -869,11 +1247,17 @@ async function guardOutput(args: {
   validated: ValidatedOutput | undefined
 }): Promise<ValidatedOutput | undefined> {
   const { config, state, events, runId, signal, validated } = args
+
+  // The **initiating** agent's guardrails, not the acting one's. An output
+  // guardrail is a promise to the caller about what leaves the run — a
+  // specialist reached by a handoff cannot be the one who decides whether the
+  // answer is allowed out, or delegation would be a way around the policy.
   const guardrails = config.outputGuardrails
   if (!guardrails || guardrails.length === 0) return validated
 
   const text = state.finalText()
   const turn = state.turns
+  const agentName = state.activeAgentName
 
   const { value, replaced } = await applyOutputGuardrails<unknown>({
     // The runner only ever knows `unknown` here; it never inspects the value,
@@ -882,13 +1266,13 @@ async function guardOutput(args: {
     output: validated ? validated.value : text,
     context: {
       runId,
-      agentName: config.name,
+      agentName,
       turn,
       messages: state.messages,
       signal,
       text,
     },
-    reporter: { events, runId, agentName: config.name, turn },
+    reporter: { events, runId, agentName, turn },
   })
 
   if (!replaced) return validated
@@ -920,17 +1304,14 @@ interface ValidatedOutput {
 async function finalizeOutput(args: {
   output: ResolvedOutput
   state: RunState
-  config: AgentConfig<unknown>
+  /** Whichever agent produced the answer — it is also the one asked to fix it. */
+  active: ActiveAgent
   events: EventEmitter
   runId: string
   signal: AbortSignal
-  providers: readonly ModelProvider[]
-  retryPolicy: ResolvedRetryPolicy
-  modelTimeoutMs: number
-  system: string | undefined
-  metadata: Readonly<Record<string, string>> | undefined
 }): Promise<ValidatedOutput> {
-  const { output, state, config, events, runId, signal } = args
+  const { output, state, events, runId, signal } = args
+  const agentName = state.activeAgentName
 
   // The turn being repaired. Repair steps carry it too, so `steps` still group
   // by exchange rather than inventing turn numbers that never happened.
@@ -959,7 +1340,7 @@ async function finalizeOutput(args: {
     events.emit({
       type: 'output.invalid',
       runId,
-      agentName: config.name,
+      agentName,
       turn,
       attempt,
       maxAttempts,
@@ -985,20 +1366,18 @@ async function finalizeOutput(args: {
  */
 async function requestRepair(args: {
   state: RunState
-  config: AgentConfig<unknown>
+  active: ActiveAgent
   events: EventEmitter
   runId: string
   signal: AbortSignal
-  providers: readonly ModelProvider[]
-  retryPolicy: ResolvedRetryPolicy
-  modelTimeoutMs: number
-  system: string | undefined
-  metadata: Readonly<Record<string, string>> | undefined
   output: ResolvedOutput
   turn: number
   issues: readonly SchemaIssue[]
 }): Promise<string> {
-  const { state, config, events, runId, signal, output, turn, issues } = args
+  const { state, active, events, runId, signal, output, turn, issues } = args
+  const config = active.config
+  const agentName = state.activeAgentName
+  const system = systemOf(active, output)
 
   // The invalid assistant turn is already in the log — the loop appended it
   // before taking the exit branch — so the model can see what it said. This adds
@@ -1014,30 +1393,32 @@ async function requestRepair(args: {
   // what guarantees the answer is text. Not `toolChoice: 'none'` — some
   // OpenAI-compatible servers reject a choice sent without tools.
   const request: ModelRequest = {
-    messages: state.messages,
-    ...(args.system ? { system: args.system } : {}),
+    // The view, like every other request: a repair after a handoff must not
+    // hand the specialist back the history its `filter` deliberately removed.
+    messages: state.view,
+    ...(system ? { system } : {}),
     responseFormat: output.responseFormat,
     ...(config.maxOutputTokens !== undefined ? { maxOutputTokens: config.maxOutputTokens } : {}),
     ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-    ...(args.metadata ? { metadata: args.metadata } : {}),
+    ...(active.metadata ? { metadata: active.metadata } : {}),
   }
 
   events.emit({
     type: 'model.request',
     runId,
-    agentName: config.name,
+    agentName,
     turn,
     modelId: config.model.modelId,
-    messageCount: state.messageCount,
+    messageCount: state.viewCount,
     tools: [],
   })
 
   const outcome = await callModel({
-    providers: args.providers,
+    providers: active.providers,
     request,
     signal,
-    timeoutMs: args.modelTimeoutMs,
-    retry: args.retryPolicy,
+    timeoutMs: active.modelTimeoutMs,
+    retry: active.retryPolicy,
     // A repair answer is a JSON object that is withheld from `text.delta`
     // anyway, so streaming it would buy nothing but a second code path.
     streaming: false,
@@ -1046,7 +1427,7 @@ async function requestRepair(args: {
       events.emit({
         type: 'model.retry',
         runId,
-        agentName: config.name,
+        agentName,
         turn,
         modelId: info.provider.modelId,
         providerId: info.provider.providerId,
@@ -1061,7 +1442,7 @@ async function requestRepair(args: {
       events.emit({
         type: 'model.fallback',
         runId,
-        agentName: config.name,
+        agentName,
         turn,
         fromModelId: info.from.modelId,
         fromProviderId: info.from.providerId,
@@ -1083,7 +1464,7 @@ async function requestRepair(args: {
   events.emit({
     type: 'model.response',
     runId,
-    agentName: config.name,
+    agentName,
     turn,
     modelId: response.modelId,
     text,
@@ -1344,7 +1725,6 @@ function foldTarget(
 
 function buildResult<TOutput>(
   state: RunState,
-  config: AgentConfig<unknown>,
   stopReason: StopReason,
   instructions: string | undefined,
   validated: ValidatedOutput | undefined,
@@ -1359,7 +1739,10 @@ function buildResult<TOutput>(
 
   return {
     runId: state.runId,
-    agentName: config.name,
+    // The agent that *answered*, which after a handoff is not the one the caller
+    // invoked. `agentPath` is how you see both.
+    agentName: state.activeAgentName,
+    agentPath: state.agentPath,
     // With an `outputSchema` this is the value the validator produced, and the
     // cast is sound: `TOutput` was inferred from that same schema.
     //

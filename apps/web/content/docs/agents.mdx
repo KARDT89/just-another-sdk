@@ -60,6 +60,11 @@ export async function POST(request: Request) {
       type: 'Tool[]',
       description: 'Tools the model may call. Names must be unique.',
     },
+    handoffs: {
+      type: 'HandoffTarget[]',
+      description:
+        'Specialists this agent can transfer the conversation to. Each becomes a transfer_to_<name> tool. See Handoffs.',
+    },
     outputSchema: {
       type: 'StandardSchemaV1',
       description:
@@ -95,7 +100,13 @@ export async function POST(request: Request) {
       type: 'number',
       default: '10',
       description:
-        'Ceiling on model calls per run. Reaching it ends the run with stopReason "max_turns".',
+        'Ceiling on model calls per run, shared across a handoff chain. Reaching it ends the run with stopReason "max_turns".',
+    },
+    maxHandoffs: {
+      type: 'number',
+      default: '5',
+      description:
+        'Ceiling on transfers per run. Reaching it refuses the transfer rather than ending the run.',
     },
     onToolError: {
       type: "'return' | 'throw'",
@@ -188,12 +199,17 @@ result.output // the answer
 result.text // raw final assistant text
 result.stopReason // 'finish' | 'max_turns'
 result.messages // full conversation, ready to pass back in
-result.steps // one entry per turn
+result.steps // one entry per turn, each naming the agent that took it
 result.usage // summed across every model call
 result.turns // number of model calls
 result.durationMs
 result.modelId // the model that served the final turn
+result.agentName // the agent that produced the answer
+result.agentPath // ['triage', 'billing'] — every agent that acted
 ```
+
+`agentName` and `agentPath` differ only when the run
+[handed off](/docs/handoffs); without one, the path is `[agent.name]`.
 
 `run()` resolves only when the agent produced something. Cancellation, provider
 failures, and (under `onToolError: 'throw'`) tool failures reject instead — so a
@@ -226,6 +242,9 @@ const cheap = supportAgent.clone({
 // Extra capability for an admin
 const admin = supportAgent.withTools(issueRefund, deleteAccount)
 
+// A router built after its specialists exist
+const router = triageAgent.withHandoffs(billing, technical)
+
 // Stricter ceiling for a background job
 const batch = supportAgent.clone({ maxTurns: 3, onToolError: 'throw' })
 ```
@@ -235,9 +254,13 @@ const batch = supportAgent.clone({ maxTurns: 3, onToolError: 'throw' })
 ```ts
 agent.name // 'support'
 agent.modelId // 'anthropic/claude-opus-5'
-agent.toolNames // ['lookup_order', 'refund_order']
+agent.toolNames // ['lookup_order', 'refund_order', 'transfer_to_billing']
+agent.handoffNames // ['billing']
 agent.toConfig() // the resolved configuration, read-only
 ```
+
+`toolNames` includes the `transfer_to_*` tool each handoff contributes, because
+that is what the model is shown.
 
 ## Errors at construction time
 
