@@ -17,10 +17,12 @@ export const appName = 'just-another-sdk'
  * Importing it means the site cannot claim a version the package does not have.
  */
 export const version: string = corePackage.version
-export const tagline = 'The agent loop that cannot hang.'
+// Matches the hero heading. A <title> that disagrees with the H1 reads as a
+// page nobody has looked at in a while.
+export const tagline = 'An agent that works on install.'
 export const description =
-  'A TypeScript agent SDK with zero runtime dependencies. Define an agent, add tools, ' +
-  'run the loop, get a typed result.'
+  'A TypeScript agent SDK with zero runtime dependencies. Seventeen tools in the box, ' +
+  'a loop that cannot hang, and dangerous things refused by default.'
 
 export const docsRoute = '/docs'
 export const docsContentRoute = '/llms.mdx/docs'

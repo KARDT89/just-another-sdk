@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { cn } from '@/lib/utils'
+import { TraceRow, type TraceLine, type TraceLineKind } from './trace'
 
 /**
  * A terminal window that types out a scripted session.
@@ -12,26 +13,13 @@ import { cn } from '@/lib/utils'
  * illustration.
  */
 
-export type TerminalLineKind =
-  'command' | 'output' | 'dim' | 'success' | 'error' | 'tool' | 'result' | 'blank'
-
-export interface TerminalLine {
-  kind: TerminalLineKind
-  text: string
-  /** Extra pause before this line, ms — used to imply real work happening. */
-  delay?: number
-}
-
-const KIND_STYLES: Record<TerminalLineKind, string> = {
-  command: 'text-foreground',
-  output: 'text-foreground/85',
-  dim: 'text-muted-foreground',
-  success: 'text-term-green',
-  error: 'text-term-red',
-  tool: 'text-term-yellow',
-  result: 'text-term-cyan',
-  blank: '',
-}
+/**
+ * The line vocabulary is shared with the static {@link Trace} block, and defined
+ * there — this file is `'use client'`, so owning the types would pull the
+ * typewriter into every server component that just wants to print a trace.
+ */
+export type TerminalLineKind = TraceLineKind
+export type TerminalLine = TraceLine
 
 export function Terminal({
   lines,
@@ -65,23 +53,12 @@ export function Terminal({
       {/* Body. `min-h` is fixed so the page does not reflow as lines appear. */}
       <div className="min-h-[19rem] overflow-x-auto p-4 font-mono text-[13px] leading-relaxed sm:min-h-[21rem] sm:p-5 sm:text-sm">
         {visible.map((line, index) => (
-          <TerminalRow key={index} line={line} />
+          <TraceRow key={index} line={line} />
         ))}
         {!done && (
           <span className="jas-cursor inline-block h-4 w-2 translate-y-0.5 bg-term-green" />
         )}
       </div>
-    </div>
-  )
-}
-
-function TerminalRow({ line }: { line: TerminalLine }) {
-  if (line.kind === 'blank') return <div className="h-3" aria-hidden />
-
-  return (
-    <div className={cn('whitespace-pre', KIND_STYLES[line.kind])}>
-      {line.kind === 'command' && <span className="mr-2 select-none text-term-green">$</span>}
-      {line.text}
     </div>
   )
 }

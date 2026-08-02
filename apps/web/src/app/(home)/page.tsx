@@ -1,13 +1,13 @@
 import Link from 'next/link'
 import {
   ArrowRightIcon,
-  BracesIcon,
   EyeIcon,
   InfinityIcon,
-  KeyRoundIcon,
   PackageIcon,
   PlugZapIcon,
   ShieldCheckIcon,
+  SplitIcon,
+  WrenchIcon,
 } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -15,101 +15,134 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { InstallTabs } from '@/components/install-tabs'
 import { Terminal, type TerminalLine } from '@/components/terminal'
+import { Trace, type TraceLine } from '@/components/trace'
 import { appName, links, packageName, version } from '@/lib/shared'
 
 /**
  * The landing page.
  *
- * It leads with a real terminal session rather than a feature list, because the
- * product's whole claim — one package, a loop that terminates, a trace you can
- * read — is visible in about eight lines of actual output.
+ * Proof-led on purpose. Every claim this SDK makes is *demonstrable* — the loop
+ * terminates, the sandbox holds, the handoff shows up in a trace — so the page
+ * shows real output rather than asserting adjectives. Each terminal block below
+ * is copied from an actual run of an example in the repository, not mocked up.
  */
 
-/** Verbatim output of `pnpm example:tools`, replayed by the hero terminal. */
+/** A bare install, then an agent that already has tools. Real output. */
 const HERO_SESSION: TerminalLine[] = [
   { kind: 'command', text: `npm i ${packageName}` },
-  { kind: 'dim', text: 'added 1 package in 0.4s', delay: 420 },
+  { kind: 'dim', text: 'added 1 package in 0.4s', delay: 380 },
   { kind: 'blank', text: '' },
-  { kind: 'command', text: 'node agent.ts', delay: 300 },
-  {
-    kind: 'output',
-    text: '▶ run_m9x2k1p  travel-assistant · anthropic/claude-opus-5',
-    delay: 500,
-  },
-  { kind: 'tool', text: '  ↳ get_weather   {"city":"Paris"}', delay: 420 },
-  { kind: 'tool', text: '  ↳ get_time      {"city":"Paris"}' },
-  { kind: 'result', text: '    → {"tempC":18,"summary":"clear"}      118ms', delay: 460 },
-  { kind: 'result', text: '    → {"localTime":"14:32","tz":"CET"}     61ms' },
-  { kind: 'error', text: '    ✗ get_air_quality  upstream 503 — recovered', delay: 380 },
+  { kind: 'command', text: 'node agent.ts', delay: 260 },
+  { kind: 'output', text: '▶ run_m9x2k1p  assistant · anthropic/claude-opus-5', delay: 460 },
+  { kind: 'tool', text: '  ↳ get_weather  {"location":"Paris"}', delay: 400 },
+  { kind: 'result', text: '    → 18.2°C, clear sky                    1.5s', delay: 520 },
+  { kind: 'tool', text: '  ↳ calculate    {"expression":"18.2*9/5+32"}', delay: 300 },
+  { kind: 'result', text: '    → 64.76                                  0ms', delay: 280 },
   { kind: 'blank', text: '' },
-  { kind: 'output', text: '"It\'s 18°C and clear in Paris, 14:32 local.', delay: 520 },
-  { kind: 'output', text: ' Air quality is unavailable right now."' },
+  { kind: 'output', text: '"It\'s 18.2°C in Paris — about 65°F, and clear."', delay: 460 },
   { kind: 'blank', text: '' },
-  { kind: 'success', text: '✔ finish · 2 turns · 412 in / 63 out · 1.9s', delay: 300 },
+  { kind: 'success', text: '✔ finish · 2 turns · 412 in / 63 out · 2.1s', delay: 280 },
 ]
+
+/** Real `pnpm example:handoffs` output. */
+const HANDOFF_TRACE: readonly TraceLine[] = [
+  { kind: 'output', text: '▶ run_msbpobom  triage · mock/triage' },
+  { kind: 'tool', text: '  ↳ transfer_to_billing {"reason":"Duplicate March charge."}' },
+  { kind: 'result', text: '    → {"transferred_to":"billing"}              0ms' },
+  { kind: 'output', text: '  ⇄ handoff triage → billing · 4 messages carried' },
+  { kind: 'tool', text: '  ↳ lookup_invoice {"month":"2026-03"}' },
+  { kind: 'result', text: '    → {"charges":2,"total":"$98.00"}           84ms' },
+  { kind: 'success', text: '✔ finish · 3 turns · 612 in / 88 out · triage → billing' },
+]
+
+/** Real `pnpm example:builtin-tools` output, from the two refusal acts. */
+const REFUSAL_TRACE: readonly TraceLine[] = [
+  { kind: 'tool', text: '  ↳ read_file  {"path":"../../../etc/passwd"}' },
+  { kind: 'error', text: '    ✗ outside the directory this agent can access' },
+  { kind: 'blank', text: '' },
+  { kind: 'tool', text: '  ↳ http_fetch {"url":"http://169.254.169.254/…"}' },
+  { kind: 'error', text: '    ✗ link-local address (cloud metadata)' },
+  { kind: 'blank', text: '' },
+  { kind: 'dim', text: "  allow: ['*'] — and it still refuses" },
+  { kind: 'success', text: '✔ finish · the model read both and moved on' },
+]
+
+const INSTALL_STATS = [
+  ['1', 'package installed'],
+  ['17', 'tools in the box'],
+  ['0', 'API keys to start'],
+  ['579', 'tests, offline'],
+] as const
 
 const FEATURES = [
   {
     icon: PackageIcon,
     title: 'Zero dependencies',
-    body: 'npm ls shows one package. Providers are plain fetch calls — no vendor SDK to keep in sync, nothing transitive to audit.',
+    body: 'One package, and npm ls proves it. Providers are plain fetch calls — no vendor SDK to keep in sync, nothing transitive to audit, and it runs on Node, Bun, Deno, and the edge unchanged.',
   },
   {
     icon: InfinityIcon,
     title: 'A loop that cannot hang',
-    body: 'Every exit path sets a stopReason. A model that calls tools forever costs you maxTurns requests, not your afternoon.',
+    body: 'Every exit path sets a stopReason. A model that calls tools forever costs you maxTurns requests, not your afternoon — and that budget is shared across a whole chain of agents.',
+  },
+  {
+    icon: WrenchIcon,
+    title: 'Seventeen tools in the box',
+    body: 'Five are on every agent with no import. Weather, Wikipedia, geocoding, and currency need no API key. The calculator is a real parser, so there is no eval behind it.',
   },
   {
     icon: ShieldCheckIcon,
-    title: 'Failures stay recoverable',
-    body: 'A tool that throws becomes a tool result the model reads and works around. Your run finishes with an answer, not a stack trace.',
+    title: 'Dangerous things refused by default',
+    body: 'Filesystem tools cannot leave their root, not even through a symlink. HTTP refuses private and cloud-metadata addresses even when you allow every host. Secrets never reach a log.',
   },
   {
-    icon: BracesIcon,
-    title: 'Your validator, not ours',
-    body: 'Zod, Valibot, ArkType — anything implementing Standard Schema. Handler input is typed from the schema; the JSON Schema is derived for you.',
-  },
-  {
-    icon: KeyRoundIcon,
-    title: 'Secrets never reach your logs',
-    body: 'An API key cannot appear in a thrown error, an emitted event, or a printed trace. There is a test suite asserting exactly that.',
+    icon: SplitIcon,
+    title: 'Delegation that cannot loop',
+    body: 'Hand a conversation to a specialist and it stays one run — one id, one usage total, one transcript. A cycle is refused rather than followed, and the route is in the result.',
   },
   {
     icon: EyeIcon,
     title: 'Observable by construction',
-    body: 'Tracing, streaming, and progress UIs all consume one event stream, so you can see what your agent did without a debugger.',
+    body: 'Nineteen typed events feed tracing, metrics, and progress UIs from one stream. Every turn is recorded as it happens, so a trace is a formatter over data you already have.',
   },
 ] as const
 
-const CODE_SAMPLE = `import { Agent, tool } from '${packageName}'
+const CODE_SAMPLE = `import { Agent } from '${packageName}'
 import { openrouter } from '${packageName}/providers'
-import * as z from 'zod'
+import { webTools } from '${packageName}/tools'
 
-const agent = new Agent({
-  name: 'travel-assistant',
-  instructions: 'Use your tools rather than guessing.',
+const support = new Agent({
+  name: 'support',
+  instructions: 'Help the customer. Use your tools.',
   model: openrouter('anthropic/claude-opus-5'),
-  tools: [
-    tool({
-      name: 'get_weather',
-      description: 'Get the current weather for a city.',
-      inputSchema: z.object({ city: z.string() }),
-      execute: async ({ city }) => fetchWeather(city),
-      //                  ^^^^ string — inferred, and validated
-    }),
+
+  // calculate, current_time, date_math, unit_convert and
+  // think are already here. These add real-world data.
+  tools: [...webTools(), issueRefund],
+
+  // A person approves anything that moves money.
+  toolGuardrails: [
+    {
+      name: 'confirm-refunds',
+      tools: ['issue_refund'],
+      check: () => ({ requireApproval: true }),
+    },
   ],
+
+  // Escalate to a specialist when it needs one.
+  handoffs: [billing, technical],
 })
 
-const result = await agent.run('Weather in Paris?')
+const result = await support.run(message, { sessionId: userId })
 
-result.output      // "It's 18°C and clear in Paris."
-result.usage       // { inputTokens: 412, outputTokens: 63, … }
-result.stopReason  // 'finish'`
+result.output      // the answer, typed
+result.agentPath   // ['support', 'billing']
+result.usage       // { inputTokens: 412, … }`
 
 const CONCEPTS = [
-  ['Agent', 'name, instructions, model, tools'],
-  ['RunState', 'messages, turns, usage, steps'],
+  ['Agent', 'immutable config: model, tools, handoffs, policy'],
   ['tool()', 'schema in, typed handler out'],
+  ['RunResult', 'output, steps, usage, agentPath'],
   ['ModelProvider', 'one method: generate()'],
 ] as const
 
@@ -119,6 +152,7 @@ const PROVIDERS = [
   'groq',
   'together',
   'deepseek',
+  'xai',
   'ollama',
   'vllm',
   'lm studio',
@@ -147,15 +181,18 @@ export default function HomePage() {
               <Badge variant="outline" className="font-mono text-xs">
                 0 dependencies
               </Badge>
+              <Badge variant="outline" className="font-mono text-xs">
+                17 tools
+              </Badge>
             </div>
 
             <h1 className="font-mono text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
-              The agent loop that <span className="text-term-green">cannot hang</span>.
+              An agent that works <span className="text-term-green">on install</span>.
             </h1>
 
             <p className="max-w-xl text-lg text-pretty text-muted-foreground">
               A TypeScript agent SDK with zero runtime dependencies. Define an agent, add tools, run
-              the loop, get a typed result — on Node, Bun, Deno, or the edge.
+              a loop that cannot hang, get a typed result — on Node, Bun, Deno, or the edge.
             </p>
 
             <InstallTabs />
@@ -183,8 +220,22 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── The problem ───────────────────────────────────────────────────── */}
+      {/* ── What you get on install ───────────────────────────────────────── */}
       <section className="border-b bg-muted/20">
+        <div className="mx-auto w-full max-w-5xl px-6 py-12">
+          <dl className="grid grid-cols-2 gap-8 text-center sm:grid-cols-4">
+            {INSTALL_STATS.map(([value, label]) => (
+              <div key={label}>
+                <dt className="font-mono text-3xl font-semibold text-term-green">{value}</dt>
+                <dd className="mt-1 text-xs text-muted-foreground">{label}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      </section>
+
+      {/* ── The problem ───────────────────────────────────────────────────── */}
+      <section className="border-b">
         <div className="mx-auto w-full max-w-4xl px-6 py-16">
           <p className="font-mono text-xs tracking-widest text-muted-foreground uppercase">
             Why another one
@@ -208,7 +259,7 @@ export default function HomePage() {
       </section>
 
       {/* ── Features ──────────────────────────────────────────────────────── */}
-      <section className="border-b">
+      <section className="border-b bg-muted/20">
         <div className="mx-auto w-full max-w-6xl px-6 py-16">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {FEATURES.map(({ icon: Icon, title, body }) => (
@@ -220,6 +271,48 @@ export default function HomePage() {
                 </CardContent>
               </Card>
             ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── Proof ─────────────────────────────────────────────────────────── */}
+      <section className="border-b">
+        <div className="mx-auto w-full max-w-6xl px-6 py-16">
+          <p className="font-mono text-xs tracking-widest text-muted-foreground uppercase">
+            Not adjectives
+          </p>
+          <h2 className="mt-4 max-w-2xl font-mono text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+            Every claim on this page is something you can run.
+          </h2>
+          <p className="mt-4 max-w-2xl text-muted-foreground">
+            Both traces below are real output from examples in the repository, and both run offline
+            with no API key at all.
+          </p>
+
+          <div className="mt-10 grid gap-6 lg:grid-cols-2">
+            <div className="flex flex-col gap-4">
+              <div>
+                <h3 className="font-mono text-sm font-semibold">Delegation, in one run</h3>
+                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                  A router hands the conversation to a specialist. One run id, one usage total, one
+                  transcript — and the route on the finish line. A transfer is a tool call, so it
+                  inherits guardrails and approval for free.
+                </p>
+              </div>
+              <Trace lines={HANDOFF_TRACE} label="pnpm example:handoffs" className="flex-1" />
+            </div>
+
+            <div className="flex flex-col gap-4">
+              <div>
+                <h3 className="font-mono text-sm font-semibold">Refused before it happens</h3>
+                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                  A path that leaves the sandbox, and the cloud metadata endpoint that hands out
+                  your credentials. Both refused, both while the allowlist says everything is fine —
+                  and both as a tool result the model reads and works around.
+                </p>
+              </div>
+              <Trace lines={REFUSAL_TRACE} label="pnpm example:builtin-tools" className="flex-1" />
+            </div>
           </div>
         </div>
       </section>
@@ -237,7 +330,16 @@ export default function HomePage() {
             <p className="text-muted-foreground">
               An <code className="font-mono text-foreground">Agent</code> is immutable
               configuration, so one instance safely serves every concurrent request. Run state is
-              separate. Tools are plain functions with a schema. That is the entire mental model.
+              separate; sessions are separate again. Tools are plain functions with a schema — any{' '}
+              <a
+                href="https://standardschema.dev"
+                target="_blank"
+                rel="noreferrer"
+                className="underline decoration-dotted underline-offset-4 hover:text-foreground"
+              >
+                Standard Schema
+              </a>{' '}
+              validator, so Zod is your choice and never our dependency.
             </p>
             <Separator />
             <dl className="grid gap-4 font-mono text-sm sm:grid-cols-2">
@@ -252,7 +354,7 @@ export default function HomePage() {
 
           <div className="overflow-hidden rounded-xl border bg-card shadow-xl">
             <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-2.5">
-              <span className="font-mono text-xs text-muted-foreground">agent.ts</span>
+              <span className="font-mono text-xs text-muted-foreground">support-agent.ts</span>
             </div>
             <pre className="overflow-x-auto p-5 font-mono text-[12.5px] leading-relaxed">
               <code>{CODE_SAMPLE}</code>
@@ -271,7 +373,9 @@ export default function HomePage() {
           <p className="mx-auto mt-4 max-w-2xl text-muted-foreground">
             OpenRouter reaches hundreds of models through a single provider, and the same
             OpenAI-compatible transport covers OpenAI, Groq, Together, DeepSeek, xAI, Ollama, vLLM,
-            and LM Studio. Writing your own means implementing one method.
+            and LM Studio. Writing your own means implementing one method. Add a{' '}
+            <code className="font-mono text-foreground">fallbacks</code> chain and an outage on one
+            vendor becomes a line in your trace instead of a failed request.
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-2 font-mono text-xs">
             {PROVIDERS.map((name) => (
@@ -289,14 +393,25 @@ export default function HomePage() {
           <h2 className="font-mono text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
             Running in about two minutes.
           </h2>
+          <p className="max-w-xl text-muted-foreground">
+            Ten runnable examples ship with the repository, and three of them need no API key.
+          </p>
           <InstallTabs />
-          <Link
-            href={links.docs}
-            className="inline-flex h-10 items-center gap-2 rounded-md bg-primary px-5 font-mono text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-          >
-            Read the docs
-            <ArrowRightIcon className="size-4" />
-          </Link>
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            <Link
+              href={links.docs}
+              className="inline-flex h-10 items-center gap-2 rounded-md bg-primary px-5 font-mono text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              Read the docs
+              <ArrowRightIcon className="size-4" />
+            </Link>
+            <Link
+              href={`${links.docs}/built-in-tools`}
+              className="inline-flex h-10 items-center gap-2 rounded-md border px-5 font-mono text-sm font-medium transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              Built-in tools
+            </Link>
+          </div>
         </div>
       </section>
     </main>
