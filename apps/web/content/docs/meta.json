@@ -8,6 +8,7 @@
     "---Core---",
     "agents",
     "tools",
+    "built-in-tools",
     "handoffs",
     "structured-output",
     "providers",

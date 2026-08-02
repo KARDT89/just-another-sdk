@@ -5,8 +5,18 @@
  * so renaming the package is a two-line change.
  */
 
+import corePackage from '../../../../packages/core/package.json'
+
 export const packageName = 'just-another-sdk'
 export const appName = 'just-another-sdk'
+
+/**
+ * Read from the package rather than typed here.
+ *
+ * The hero badge said `v0.1.0` for two releases because it was a string in JSX.
+ * Importing it means the site cannot claim a version the package does not have.
+ */
+export const version: string = corePackage.version
 export const tagline = 'The agent loop that cannot hang.'
 export const description =
   'A TypeScript agent SDK with zero runtime dependencies. Define an agent, add tools, ' +

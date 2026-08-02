@@ -60,6 +60,12 @@ export async function POST(request: Request) {
       type: 'Tool[]',
       description: 'Tools the model may call. Names must be unique.',
     },
+    builtins: {
+      type: 'boolean',
+      default: 'true',
+      description:
+        'Include the five automatic pure tools (calculate, current_time, date_math, unit_convert, think). A tool of your own with the same name replaces one. See Built-in tools.',
+    },
     handoffs: {
       type: 'HandoffTarget[]',
       description:
@@ -254,13 +260,14 @@ const batch = supportAgent.clone({ maxTurns: 3, onToolError: 'throw' })
 ```ts
 agent.name // 'support'
 agent.modelId // 'anthropic/claude-opus-5'
-agent.toolNames // ['lookup_order', 'refund_order', 'transfer_to_billing']
+agent.toolNames // ['lookup_order', 'calculate', …, 'transfer_to_billing']
 agent.handoffNames // ['billing']
 agent.toConfig() // the resolved configuration, read-only
 ```
 
-`toolNames` includes the `transfer_to_*` tool each handoff contributes, because
-that is what the model is shown.
+`toolNames` is everything the model is shown: your own tools, the
+[automatic built-ins](/docs/built-in-tools), and the `transfer_to_*` tool each
+handoff contributes.
 
 ## Errors at construction time
 

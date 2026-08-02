@@ -45,6 +45,7 @@ function pair(
     instructions: 'You handle invoices and refunds. Be precise about amounts.',
     model: billingModel,
     tools: [lookupInvoice],
+    builtins: false,
   })
 
   const triage = new Agent({
@@ -52,6 +53,10 @@ function pair(
     instructions: 'Route the user to the right specialist.',
     model: triageModel,
     handoffs: [billing],
+    // Off throughout this file: these tests assert exact tool lists, and the
+    // five automatic pure tools would say nothing about handoffs while making
+    // every one of those assertions about something else.
+    builtins: false,
   })
 
   return { triage, billing, triageModel, billingModel }
@@ -86,6 +91,7 @@ describe('a handoff is a tool', () => {
       name: 'triage',
       model: mockProvider([{ text: '' }]),
       handoffs: [{ agent: specialist, toolName: 'escalate', description: 'Send it upstairs.' }],
+      builtins: false,
     })
 
     expect(router.toolNames).toEqual(['escalate'])

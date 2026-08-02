@@ -109,6 +109,44 @@ const getWeather = tool({
 - **Failures are recoverable by default.** Set `onToolError: 'throw'` on the
   agent when a tool failure should void the whole task.
 
+## Tools in the box
+
+Seventeen tools ship with the package, tiered by how much damage they could do.
+Five pure ones are on **every agent** with nothing imported and nothing
+configured:
+
+```ts
+new Agent({ name: 'assistant', model }).toolNames
+// ['calculate', 'current_time', 'date_math', 'unit_convert', 'think']
+```
+
+`calculate` is a real expression parser — **no `eval`, no `Function`** — because
+the three-line version hands a model a code execution primitive.
+
+Real data with no API key is one line, hitting fixed endpoints the model cannot
+redirect:
+
+```ts
+import { webTools } from 'just-another-sdk/tools'
+
+tools: [...webTools()] // get_weather, geocode, wikipedia, currency_convert
+```
+
+Anything that lets the model choose a host or a path has to be configured, and is
+locked down when it is:
+
+```ts
+import { httpFetch } from 'just-another-sdk/tools'
+import { fileTools } from 'just-another-sdk/tools/fs'
+
+httpFetch({ allow: ['api.example.com'] }) // private + metadata IPs refused even with '*'
+fileTools({ root: './workspace' }) // `..`, absolute paths, and symlinks out all refused
+```
+
+See [Built-in tools](https://github.com/KARDT89/just-another-sdk/blob/main/apps/web/content/docs/built-in-tools.mdx)
+for the full list, the security model, and the ~732 tokens per request the
+automatic five cost.
+
 ## Handoffs
 
 One agent that knows everything is a prompt that knows nothing well. Give a cheap
@@ -329,8 +367,8 @@ optional but the whole thing is designed around it.
 
 ## Roadmap
 
-Built-in tool pack · native Anthropic and Gemini providers · trace exporters for
-JSON and OpenTelemetry.
+Native Anthropic and Gemini providers · trace exporters for JSON and
+OpenTelemetry · a sandboxed `run_command`.
 
 ## License
 

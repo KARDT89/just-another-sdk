@@ -11,6 +11,11 @@ export default defineConfig({
     'sessions/file': 'src/sessions/file.ts',
     'sessions/sqlite': 'src/sessions/sqlite.ts',
     'streams/index': 'src/streams/index.ts',
+    // Same split, same reason: `tools` is fetch-only and runs anywhere, so the
+    // filesystem pack is its own entry rather than dragging `node:fs` into an
+    // edge bundle that only wanted the weather.
+    'tools/index': 'src/tools/builtin/index.ts',
+    'tools/fs': 'src/tools/builtin/fs.ts',
   },
   format: ['esm', 'cjs'],
   dts: true,

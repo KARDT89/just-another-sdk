@@ -30,6 +30,7 @@
     "example:structured": "pnpm --filter example-structured start",
     "example:guardrails": "pnpm --filter example-guardrails start",
     "example:handoffs": "pnpm --filter example-handoffs start",
+    "example:builtin-tools": "pnpm --filter example-built-in-tools start",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "turbo run build --filter=just-another-sdk && changeset publish"

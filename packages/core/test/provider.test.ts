@@ -49,6 +49,9 @@ describe('request translation', () => {
       model,
       instructions: 'Be brief.',
       tools: [weather],
+      // This asserts the exact wire shape of one tool; the built-ins would add
+      // five more and say nothing about the translation being correct.
+      builtins: false,
       maxOutputTokens: 512,
       temperature: 0.2,
     }).run('Hi')

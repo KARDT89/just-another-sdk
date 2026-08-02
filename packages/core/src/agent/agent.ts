@@ -1,6 +1,6 @@
 import { ConfigurationError } from '../errors/errors.js'
 import type { ApprovalDecision, ApprovalSuspension } from '../guardrails/types.js'
-import { handoffTools, resolveHandoffs } from '../handoffs/handoff.js'
+import { resolveHandoffs } from '../handoffs/handoff.js'
 import type { HandoffTarget, ResolvedHandoff } from '../handoffs/types.js'
 import type { RunResult } from '../run/result.js'
 import { executeRun, runAgent } from '../run/runner.js'
@@ -18,6 +18,7 @@ import {
 } from '../streams/resumable.js'
 import type { StreamStore } from '../streams/store.js'
 import { ToolRegistry } from '../tools/registry.js'
+import { resolveAgentTools } from '../tools/resolve.js'
 import type { AnyTool } from '../tools/tool.js'
 import type { ModelMessage } from '../types/messages.js'
 import type { AgentConfig, AgentInput, RunOptions } from './types.js'
@@ -91,8 +92,9 @@ export class Agent<TOutput = string> {
 
     // Constructing the registry here surfaces duplicate tool names immediately,
     // at the point the developer wrote the mistake, rather than on first run.
-    // Transfer tools are part of it, so a `toolGuardrail` can name one.
-    this.registry = new ToolRegistry([...(config.tools ?? []), ...handoffTools(this.handoffs)])
+    // Built-ins and transfer tools are part of it, so a `toolGuardrail` can name
+    // either. Shared with the runner so the two cannot disagree.
+    this.registry = new ToolRegistry(resolveAgentTools(config, this.handoffs))
 
     // A tool guardrail naming a tool that does not exist would simply never
     // fire — a typo in a security control that fails *open* and is invisible

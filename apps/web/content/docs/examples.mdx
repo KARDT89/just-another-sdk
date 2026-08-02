@@ -3,9 +3,9 @@ title: Examples
 description: Runnable projects in the repository.
 ---
 
-All nine examples live in the
+All ten examples live in the
 [repository](https://github.com/KARDT89/just-another-sdk/tree/main/examples) and run
-against a real model — except the last two, which are entirely offline. Clone it,
+against a real model — except the last three, which are entirely offline. Clone it,
 add a key, and go:
 
 ```bash
@@ -344,6 +344,37 @@ that make delegation safe:
 ```
 
 Three turns, one run, one usage total. See [Handoffs](/docs/handoffs).
+
+## 10 — Built-in tools
+
+```bash
+pnpm example:builtin-tools           # entirely offline
+pnpm example:builtin-tools -- --live # the keyless tier, for real
+```
+
+The tool pack, in four acts:
+
+- Five tools on an agent constructed with nothing but a name and a model — and
+  an `eval` attempt against `calculate` that comes back a parse error.
+- Weather for Paris with **no API key**, through a fixed endpoint the model
+  cannot redirect.
+- A filesystem rooted at one directory, and a model reaching for `/etc/passwd`
+  getting a tool result rather than a file.
+- `http_fetch` refusing `169.254.169.254` — the cloud metadata endpoint — while
+  the allowlist says `*`.
+
+```text
+   tools: calculate, current_time, date_math, unit_convert, think
+   config: none — this agent was constructed with a name and a model.
+
+  ↳ read_file {"path":"../../../etc/passwd"}
+    ✗ "../../../etc/passwd" is outside the directory this agent can access.
+
+  ↳ http_fetch {"url":"http://169.254.169.254/latest/meta-data/…"}
+    ✗ 169.254.169.254 is a link-local address (cloud metadata).
+```
+
+See [Built-in tools](/docs/built-in-tools).
 
 ## Patterns worth copying
 

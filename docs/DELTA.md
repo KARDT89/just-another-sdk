@@ -4,11 +4,11 @@
 
 |         |                                                           |
 | ------- | --------------------------------------------------------- |
-| Step    | 6 of 8 — handoffs                                         |
+| Step    | 7 of 8 — the built-in tool pack                           |
 | Date    | 2026-08-02                                                |
-| Package | `just-another-sdk@0.2.0` — **published**; 0.3.0 pending   |
-| Size    | 54 source files, ~11.2k lines, **0 runtime dependencies** |
-| Tests   | 461 — 449 offline (~2.2s) + 12 live                       |
+| Package | `just-another-sdk@0.3.0` — **published**; 0.4.0 pending   |
+| Size    | 65 source files, ~14.5k lines, **0 runtime dependencies** |
+| Tests   | 579 — 567 offline (~2.5s) + 12 live                       |
 
 This file is rewritten at the end of every step. It is the current state of the
 project, not a changelog — release history lives in
@@ -22,10 +22,14 @@ project, not a changelog — release history lives in
 Grouped by the seam it occupies. Step 1 built the loop, step 2 wrapped the model
 call inside it, step 3 wrapped the loop itself, step 3.5 wrapped the result so it
 could reach a browser, step 4 wrapped the _answer_, step 5 wrapped the whole
-thing in **policy**. Step 6 changed **who is inside the loop**.
+thing in **policy**, step 6 changed **who is inside the loop**. Step 7 changed
+what the agent can **reach**.
 
-That last one is the honest framing, and it is the first step since step 1 to
-touch the loop body meaningfully — see [Decisions](#decisions-made-in-step-6).
+Step 7 is the first step that is not a runtime change at all: the loop, the
+state, and the events are untouched. What changed is that `npm i` now hands you
+an agent that can already do things — and, because several of those things touch
+the network and the disk, a security boundary that did not previously need to
+exist.
 
 ### Agent runtime
 
@@ -114,6 +118,24 @@ touch the loop body meaningfully — see [Decisions](#decisions-made-in-step-6).
 | [`tools/tool.ts`](../packages/core/src/tools/tool.ts)         | `tool()` — handler input inferred from the schema; memoized JSON Schema |
 | [`tools/execute.ts`](../packages/core/src/tools/execute.ts)   | Validate → deadline → invoke → wrap failures as recoverable results     |
 | [`tools/registry.ts`](../packages/core/src/tools/registry.ts) | Name-indexed lookup; duplicate names rejected at construction           |
+| [`tools/resolve.ts`](../packages/core/src/tools/resolve.ts)   | Own tools + built-ins + transfer tools. **One place, two callers**      |
+
+### The built-in tool pack
+
+Seventeen tools, tiered by **who chooses the host** — which is the line that
+matters, not "network or not".
+
+| File                                                                              | Does                                                                         |
+| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| [`schema/mini.ts`](../packages/core/src/schema/mini.ts)                           | A ~150-line Standard Schema, so built-in arguments are validated with no Zod |
+| [`tools/builtin/pure.ts`](../packages/core/src/tools/builtin/pure.ts)             | The five automatic tools. No I/O, no config, nothing to lock down            |
+| [`tools/builtin/calculator.ts`](../packages/core/src/tools/builtin/calculator.ts) | A recursive-descent parser. **No `eval`, no `Function`**                     |
+| [`tools/builtin/units.ts`](../packages/core/src/tools/builtin/units.ts)           | Eight dimensions as ratio tables; temperature handled explicitly             |
+| [`tools/builtin/web.ts`](../packages/core/src/tools/builtin/web.ts)               | Weather, geocoding, Wikipedia, currency — fixed endpoints, **no key**        |
+| [`tools/builtin/url-policy.ts`](../packages/core/src/tools/builtin/url-policy.ts) | The security boundary: allowlist, address rules, redirect re-checks          |
+| [`tools/builtin/http.ts`](../packages/core/src/tools/builtin/http.ts)             | `httpFetch`, `readUrl`, capped streaming reads, HTML → prose                 |
+| [`tools/builtin/search.ts`](../packages/core/src/tools/builtin/search.ts)         | `webSearch(client)` — the vendor is yours, structurally                      |
+| [`tools/builtin/fs.ts`](../packages/core/src/tools/builtin/fs.ts)                 | Five rooted filesystem tools; `realpath` containment                         |
 
 ### Providers
 
@@ -144,6 +166,8 @@ The suite, by file:
 | Suite                                           | Count | Needs a key                             |
 | ----------------------------------------------- | ----- | --------------------------------------- |
 | `sessions`                                      | 144   | no                                      |
+| `builtin-tools`                                 | 73    | no                                      |
+| `tool-sandbox`                                  | 45    | no                                      |
 | `guardrails`                                    | 40    | no                                      |
 | `structured-output`                             | 37    | no                                      |
 | `handoffs`                                      | 35    | no                                      |
@@ -188,95 +212,104 @@ These are the design. Every future step must preserve them, and each has tests.
 
 ---
 
-## Decisions made in step 6
+## Decisions made in step 7
 
-All three of step 5's open questions are answered, and the handoffs page was
-revised against what it had committed to — consciously, with the reason written
-into the page itself.
+The three questions step 6 left open are answered, and one that only appeared
+once the code existed.
 
-| Question                                  | Answer                              | Why                                                                                                                                                                                                  |
-| ----------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Replace the run, or nest inside it?**   | Flat — one run, `agentPath`         | A nested run means two `runId`s, two event streams to merge for `stream()`, two session saves to reconcile, and `maxTurns` threaded by hand. Invariant 4 survives only because there is one run      |
-| **`max_handoffs`: stop reason or error?** | **Neither** — refuse the call       | The committed doc promised a `StopReason`. Both alternatives discard a run whose conversation is valid and whose current agent could answer. Refusing the _call_ leaves invariants 1 and 2 untouched |
-| **Whose `outputSchema` wins?**            | The initiator's                     | `triage.run<Ticket>()` returning whatever the specialist happened to declare makes `RunResult<T>` a lie. The _instruction_ still follows the acting agent, so the specialist is told the shape       |
-| **`handoff.end`?**                        | Dropped                             | A flat handoff is a transition, not a span. The receiving agent holds the run until it ends or transfers onward, so the only honest close is `run.finish` — which now carries `agentPath`            |
-| **Where do the limits live?**             | After execution, before the results | The transfer tool has no side effect, so "run it then refuse it" costs nothing and keeps the limit checks out of `executeToolCalls` entirely                                                         |
+| Question                             | Answer                                     | Why                                                                                                                                                             |
+| ------------------------------------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Allowlist by default, or refuse?** | Refuse — no allowlist, no requests         | An allowlist of nothing _is_ refusing, with a friendlier error. There is no permissive default anywhere in the pack                                             |
+| **One import or four?**              | Two: `tools` and `tools/fs`                | The split that matters is `node:fs`, not tidiness. Everything else is `fetch`, so it runs on the edge; the filesystem pack must not be dragged into that bundle |
+| **Core or a second package?**        | Core                                       | A second package doubles the release process for a solo maintainer and halves the chance anyone finds the tools. Subpath exports give the same tree-shaking     |
+| **What does "by default" mean?**     | Pure tools auto-on; everything else opt-in | Split by blast radius. Auto-enabling HTTP ships an SSRF vector to every user of the SDK; auto-enabling the filesystem lets a prompt injection read `~/.ssh`     |
 
-Three traps the design is built around, each with a test that fails without it:
+Four traps the design is built around, each with a test that fails without it:
 
-- **The `onToolError: 'throw'` trap, again.** A refused transfer sets no `error`
-  on the outcome, exactly as a guardrail rejection does not. Someone who set that
-  flag so a broken database aborts the run must not lose the run to a routing
-  policy. Tested under both policies.
-- **The approval-resume trap.** `settleApprovals` runs _before_ the loop. If the
-  approved call was a transfer and nothing applied it, the human says yes, the
-  tool result says "transferred to billing", and triage answers the question it
-  just delegated. It returns the accepted handoff so both it and the loop go
-  through one `applyHandoff`.
-- **The filter-as-deletion trap.** A `filter` narrows `state.view`; the session
-  save and `RunResult.messages` read `state.messages`. Two accessors instead of
-  one, because otherwise delegation becomes a way to erase a user's history.
-  Tested with `filter: () => []` and a real store.
+- **The calculator-as-`eval` trap.** The three-line version of this tool hands a
+  model a general-purpose code execution primitive, and the model does not have
+  to be adversarial to reach it — a prompt injection in a fetched page is enough.
+  So it is a parser, and a test reads the module's **own source** to assert
+  neither `eval` nor `Function` appears in it.
+- **The symlink trap.** Normalising `..` away is not containment. A link at
+  `workspace/notes -> /etc` contains no traversal and normalises to a path
+  squarely inside the root. Only `realpath`-then-recheck catches it, and the
+  suite plants exactly that link.
+- **The redirect trap.** Checking the allowlist once, against the URL the model
+  supplied, makes it decorative: an allowed host that `302`s to `127.0.0.1` walks
+  straight through. `redirect: 'manual'` and a re-check per hop is the fix.
+- **The duplicate-name trap.** `ToolRegistry` throws on duplicates, so shipping a
+  new built-in would have broken — at construction, on upgrade — every agent that
+  already had a tool called `calculate`. A developer's own tool silently wins.
 
 Things the plan did not anticipate:
 
-- **The loop body genuinely changed this time.** Steps 2–5 could each claim they
-  left it alone; this one cannot. Nine hoisted `const`s above the loop all had to
-  become per-agent, and a loop reading nine variables that must be swapped in
-  lockstep is a loop with nine chances to swap eight of them. They are one
-  `ActiveAgent` record now, resolved lazily and memoized per config. The 426
-  existing tests were the canary for that substitution and passed unmodified.
-- **`RunState` grew a second log.** `viewLog` stays `undefined` until a _filtered_
-  handoff happens, so the default path allocates nothing and behaves exactly as
-  before. `replaceFinalText` patches the view by object identity rather than by
-  index, because after a filter the two logs are not aligned.
-- **`repairPairing` needed a second pass.** Dropping orphaned tool results can
-  _create_ the other illegal shape — an assistant turn whose calls are now
-  unanswered. The fix keeps the turn's text and drops only the dangling calls.
-- **`maxHandoffs` resets across a suspension.** A suspension carries messages, not
-  counters. Cycle detection is unaffected because it reads the route, which is
-  reconstructed from the conversation. Documented rather than papered over.
+- **Zero dependencies made validation the hard part.** Built-in tools need their
+  arguments checked, and the SDK cannot import Zod to describe its own
+  parameters. Step 6 sidestepped it with raw `parameters` JSON Schema and _no
+  validation_, which is fine for one optional string and not for a filesystem
+  path. The answer is `schema/mini.ts`: ~150 lines implementing the same
+  Standard Schema interface every supported validator implements, hooked in
+  through the `toJSONSchema()` strategy `resolveJsonSchema` already looked for.
+  No converter to register, no `parameters` duplicate to keep in sync.
+- **A live run found a bug the offline suite could not.** `wikipedia` returned
+  `HTTP 429` on the first real call: Wikipedia's API policy requires a
+  descriptive `User-Agent`, and Node's `fetch` sends nothing useful. Fixed with a
+  default UA and a `userAgent` option, plus a 429 message that says the fix is
+  configuration rather than a retry.
+- **The escape suite found a real hole.** `http://[::ffff:127.0.0.1]/` was
+  reaching loopback, because `new URL()` **rewrites the dotted quad into hex** —
+  it arrives as `::ffff:7f00:1`, which the dotted-quad check never matched. The
+  test was written before the fix and failed, which is the entire argument for
+  writing the escape suite first.
+- **Auto-on tools are not free, and the number is now pinned.** The five cost
+  **~732 tokens on every request of every agent**. A test asserts the combined
+  definition size stays under budget, so the figure in the docs cannot drift from
+  the code, and `builtins: false` is documented next to it.
 
 ### Zero dependencies held
 
-Nothing added. The transfer tool's parameters are written as raw JSON Schema
-precisely because the SDK cannot import a validator to describe its own single
-optional string.
+Nothing added. Seventeen tools, four public APIs called (`fetch`, `URL`, `Intl`,
+`node:fs` in the separate entry), and `pnpm why` shows nothing new.
 
 ## Verified vs unverified
 
-| Claim                                                           | How it was checked                                                 | Result         |
-| --------------------------------------------------------------- | ------------------------------------------------------------------ | -------------- |
-| Lint, format, typecheck, test, build                            | `pnpm check` across 12 workspaces                                  | pass           |
-| **The 426 step-5 tests still pass**                             | unmodified — the canary for the `ActiveAgent` substitution         | pass           |
-| Two agents transfer; the receiver's model, tools, prompt serve  | `steps[].modelId` is `triage, billing, billing`                    | pass           |
-| A cycle is refused rather than followed                         | `A → B → A`; the refusal names the route                           | pass           |
-| `maxHandoffs` refuses the call, and the run still answers       | `stopReason: 'finish'`, `handoff_refused` in the result            | pass           |
-| A refusal finishes under **both** `onToolError` policies        | same script, both policies                                         | pass           |
-| Two transfers in one turn → first wins, second refused          | `already_transferring`, one `handoff.start`                        | pass           |
-| `maxTurns` is shared, not per agent                             | `maxTurns: 3` across a chain → `turns === 3`                       | pass           |
-| A transfer is gated by the routing agent's tool guardrails      | rejected; the specialist's model never called                      | pass           |
-| **An approved transfer takes effect on resume**                 | `agentPath` is `['triage','billing']` after `resumeApproval`       | pass           |
-| A denied transfer leaves the router holding the conversation    | specialist's model never called                                    | pass           |
-| A suspension survives `JSON.stringify` → `parse`                | resumed from the re-parsed object                                  | pass           |
-| A `filter` narrows the request and **nothing else**             | `filter: () => []`; the store still holds the transcript           | pass           |
-| A filter that orphans a tool result is repaired                 | no `tool` message reaches the provider                             | pass           |
-| The initiator's `outputSchema` governs; the target's is ignored | plus the instruction reaching the receiver's system prompt         | pass           |
-| `handoff.start` sits between `tool.end` and the next request    | full ordering assertion                                            | pass           |
-| `agentPath` arrives identically through `stream()`              | iterated the events                                                | pass           |
-| An unreached handoff target is never resolved                   | its `instructions` thunk was never called                          | pass           |
-| The example runs with no API key at all                         | ran it; all four acts                                              | pass           |
-| **Real Postgres and real Redis**                                | not run — adapters tested against fakes                            | **unverified** |
-| **Real streaming against a real model**                         | still not run — needs a key                                        | **unverified** |
-| **A handoff against a real model**                              | offline only; whether models _choose_ to transfer well is untested | **unverified** |
-| **`strict: true` against a real OpenAI endpoint**               | offline-untestable; needs a key                                    | **unverified** |
+| Claim                                                  | How it was checked                                       | Result         |
+| ------------------------------------------------------ | -------------------------------------------------------- | -------------- |
+| Lint, format, typecheck, test, build                   | `pnpm check` across 13 workspaces                        | pass           |
+| The 461 step-6 tests still pass                        | 8 needed `builtins: false` — see below                   | **amended**    |
+| `calculate` cannot execute code                        | 7 escape attempts, plus reading its own source           | pass           |
+| `unit_convert` round-trips and refuses cross-dimension | `c → f → c`; `km → kg` rejected                          | pass           |
+| `date_math` gets month ends and leap years right       | 31 Jan + 1 month → 28 Feb; → 29 Feb in 2024              | pass           |
+| Filesystem escapes all fail                            | 4 traversal forms, absolute path, **planted symlink**    | pass           |
+| An escape never leaks the absolute host path           | asserted on the error message                            | pass           |
+| 11 address forms refused with `allow: ['*']`           | loopback, private, metadata, IPv6, IPv4-mapped           | pass           |
+| A redirect to a blocked host is refused                | and the second hop is never requested                    | pass           |
+| A wildcard matches on a dot boundary only              | `notwikipedia.org` rejected by `*.wikipedia.org`         | pass           |
+| Caps hold on responses and writes                      | streamed and stopped, not buffered then measured         | pass           |
+| Built-ins present by default, absent when off          | plus a same-named tool replacing rather than throwing    | pass           |
+| The built-ins' context cost stays under budget         | pinned at < 3,200 characters                             | pass           |
+| The keyless tier works with **no API key**             | **ran live** — Open-Meteo, Wikipedia, ECB rates, geocode | pass           |
+| The example runs with no API key at all                | ran it; all four acts                                    | pass           |
+| **Real Postgres and real Redis**                       | not run — adapters tested against fakes                  | **unverified** |
+| **Real streaming against a real model**                | still not run — needs a key                              | **unverified** |
+| **A handoff against a real model**                     | offline only; whether models transfer _well_ is untested | **unverified** |
+| **Whether models use these tools well**                | every test drives them through `mockProvider`            | **unverified** |
+| **`strict: true` against a real OpenAI endpoint**      | offline-untestable; needs a key                          | **unverified** |
 
-> **What the offline suite cannot tell you about handoffs.** Every mechanical
-> property above is real. Whether a router _decides well_ — whether the
-> synthesized description is enough for a model to pick the right specialist — is
-> a prompt-quality question that a scripted provider cannot answer. The first
-> live run of `example:handoffs` against a real model is the test that matters,
-> and it has not happened.
+> **The amended row, stated rather than buried.** Eight step-6 tests failed when
+> the automatic tools landed, because they asserted exact tool lists and now saw
+> five more. Each was given `builtins: false` so it tests what it always meant to
+> test — the wire shape of one tool, the ordering of one run — rather than being
+> re-baselined to absorb the new count. That is a real behaviour change for
+> anyone on 0.3.0: their agents will start seeing five extra tools. It is the
+> price of "by default", it is opt-out, and the changeset says so.
+
+> **What the offline suite still cannot tell you.** Every mechanical property
+> above is real. Whether a model _reaches for_ `calculate` instead of doing
+> arithmetic in its head, or picks the right unit string, is a prompt-quality
+> question a scripted provider cannot answer. The descriptions are written for
+> that job; none of it is measured.
 
 ---
 
@@ -287,7 +320,7 @@ Mapped to the 12 graded categories in [`CLAUDE.md`](../CLAUDE.md).
 | #   | Category                      | Marks | State       | What's missing                                                                      |
 | --- | ----------------------------- | ----- | ----------- | ----------------------------------------------------------------------------------- |
 | 1   | Agent runtime                 | 15    | **done**    | —                                                                                   |
-| 2   | Tools                         | 10    | **done**    | Built-in tool pack (step 7) is additive                                             |
+| 2   | Tools                         | 10    | **done**    | Custom authoring, validation, async, typed results — **plus 17 built-ins**          |
 | 3   | Handoffs                      | 10    | **done**    | Delegation, context transfer, three limits, events, docs, a runnable example        |
 | 4   | Guardrails                    | 10    | **done**    | Input, output, tool, approval gates, and a fail-closed rule                         |
 | 5   | Memory & sessions             | 10    | **done**    | 5 adapters, windowed reads, undo, trimming, summarization, events                   |
@@ -295,7 +328,7 @@ Mapped to the 12 graded categories in [`CLAUDE.md`](../CLAUDE.md).
 | 7   | Reliability                   | 10    | **done**    | Timeouts, cancellation, loop bounds, typed errors, retries, fallback, secret safety |
 | 8   | Tracing                       | 5     | **partial** | `steps[]` + 19 events + console tracer + an SSE feed; no JSON/OTel exporters        |
 | 9   | Developer experience          | 10    | **done**    | Typed end to end, zero-config install, actionable errors, shipped test helpers      |
-| 10  | Docs & examples               | 10    | **partial** | 17 pages + 9 runnable examples, none forward-looking; **not yet hosted**            |
+| 10  | Docs & examples               | 10    | **partial** | 18 pages + 10 runnable examples; **not yet hosted**                                 |
 | 11  | Product thinking              | 10    | **done**    | Differentiation is real and demonstrable                                            |
 | 12  | Demo & pitch                  | 10    | not started | Landing page done; **no video**                                                     |
 
@@ -304,45 +337,42 @@ hosting the docs (category 10) and the video (12).
 
 ---
 
-## Next step — 7 of 8: the built-in tool pack
+## Next step — 8 of 8: launch
 
-The last additive runtime work. Nothing in it changes the loop; the point is that
-`npm i just-another-sdk` should give a developer something to _do_ on the first
-afternoon rather than a set of interfaces to implement.
+No more runtime work. The two categories still open are the two nobody else can
+do for you.
 
-- [ ] **`fetchTool`** — HTTP with an allowlist, a size cap, and a redirect bound.
-      Dangerous by default is the whole risk here; it ships locked down.
-- [ ] **`fileTools`** — read/write/list rooted at a directory, with traversal
-      refused rather than normalised away.
-- [ ] **`calculator`** — expression evaluation with no `eval`, no `Function`.
-- [ ] **`webSearch`** — provider-injected, like the Redis and Postgres adapters,
-      so the pack stays at zero dependencies.
-- [ ] Ship them from `just-another-sdk/tools`, each composable with the
-      `toolGuardrails` that already exist.
+- [ ] **Host the docs.** [`vercel.json`](../apps/web/vercel.json) already has the
+      monorepo build command; point Vercel at `apps/web`. Then put the real URL
+      in [`README.md`](../README.md) and `packages/core/package.json` `homepage`,
+      both of which currently guess at `just-another-sdk.vercel.app`.
+- [ ] **Write the pitch.** Who it is for, what it solves, why it should exist,
+      how it differs, why anyone would adopt it. The material is all in this
+      repository already — the zero-dependency claim, the loop that cannot hang,
+      the escape suite — it has never been written as an argument.
+- [ ] **Record the video.** Face on camera, the product demonstrated, the
+      technical decisions explained.
+- [ ] **Post it publicly**, per the brief.
 
 ### Acceptance
 
-`pnpm check` green · every tool has a failure test as well as a success one ·
-the sandbox tools have an escape test that must fail to escape · zero new runtime
-dependencies · the 461 existing tests pass unmodified.
+The docs resolve at a real URL · the README and `homepage` point at it · a pitch
+someone could read in two minutes · a video where the product is visibly working.
 
-### Open design questions
+### Open questions
 
-1. **Does `fetchTool` allowlist by default, or refuse without configuration?**
-   Refusing is safer and worse to demo; an allowlist of nothing is the same thing
-   with a friendlier error.
-2. **Is the pack one import or four?** One is easier to show; four is easier to
-   tree-shake, and a filesystem tool in an edge bundle is dead weight.
-3. **Do these ship in core or a second package?** A second package keeps core's
-   surface honest but doubles the release process for a solo maintainer.
+1. **Does `run_command` ship before launch?** It is the one obvious gap in the
+   tool pack, and it is also the one tool where a mistake is unrecoverable.
+2. **Is the hosted docs URL a custom domain or `*.vercel.app`?** It goes in a
+   published `package.json`, so changing it later means a release.
 
 ---
 
 ## Later steps
 
-| Step | Scope                                                              |
-| ---- | ------------------------------------------------------------------ |
-| 8    | **Launch** — host the docs, record the demo video, write the pitch |
+Nothing scheduled after launch. Candidates, in rough order of value: trace
+exporters for JSON and OpenTelemetry (closes the last `partial`), native
+Anthropic and Gemini providers, and a sandboxed `run_command`.
 
 ---
 
@@ -350,13 +380,13 @@ dependencies · the 461 existing tests pass unmodified.
 
 Only you can do these.
 
-- [ ] **Publish 0.3.0 by hand.** One changeset is pending. `pnpm changeset version`
-      bumps to 0.3.0 and writes the changelog; `pnpm release` builds and publishes,
+- [ ] **Publish 0.4.0 by hand.** One changeset is pending. `pnpm changeset version`
+      bumps to 0.4.0 and writes the changelog; `pnpm release` builds and publishes,
       prompting for an OTP.
 - [ ] **The release workflow still cannot publish.** Both attempts failed with
       `ERR_PNPM_OTP_NON_INTERACTIVE`: the npm account is set to
       `two-factor auth: auth-and-writes`, so a stored `NPM_TOKEN` can never
-      satisfy the registry on its own. **0.1.0 and 0.2.0 were both pushed by
+      satisfy the registry on its own. **0.1.0, 0.2.0, and 0.3.0 were all pushed by
       hand.** The workflow's `version` half works — it opened and merged the
       "Version Packages" PR — only `publish` fails. Three ways out, best first:
       **npm Trusted Publishing (OIDC)**, which bypasses 2FA and stores no token
@@ -368,11 +398,15 @@ Only you can do these.
       `git push origin --delete changeset-release/main`.
 - [ ] **Uncomment `OPENROUTER_API_KEY` in `examples/.env`**, then run
       `pnpm example:stream`, `example:structured`, `example:sessions`,
-      `example:server`, and `example:resumable`. `example:guardrails` and
-      `example:handoffs` need no key.
+      `example:server`, and `example:resumable`. `example:guardrails`,
+      `example:handoffs`, and `example:builtin-tools` need no key.
 - [ ] **Run `example:handoffs` against a real model once.** Swap the mocks for
       `openrouter(...)` and check the router actually picks the right specialist.
-      It is the only claim in this file the offline suite cannot make.
+- [ ] **Watch a real model use the built-in tools once.** Whether it reaches for
+      `calculate` instead of doing arithmetic in its head is the one thing the
+      offline suite cannot tell you, and the tool descriptions are written for
+      exactly that job. `pnpm example:builtin-tools -- --live` already proves the
+      _endpoints_ work with no key; this is about tool _selection_.
 - [ ] **Point Vercel at `apps/web`** — [`vercel.json`](../apps/web/vercel.json)
       has the monorepo build command already. Then put the URL in
       [`README.md`](../README.md) and

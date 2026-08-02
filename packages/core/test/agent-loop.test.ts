@@ -57,9 +57,13 @@ describe('single-turn run', () => {
 
   it('omits the tools field entirely when the agent has none', async () => {
     const model = mockProvider([{ text: 'ok' }])
-    await new Agent({ name: 'a', model }).run('Hi')
 
-    // Some providers reject an empty `tools: []`, so it must be absent.
+    // `builtins: false` is what makes an agent genuinely tool-less now that five
+    // pure tools are automatic. The invariant under test is unchanged: some
+    // providers reject an empty `tools: []`, so the field must be absent rather
+    // than empty.
+    await new Agent({ name: 'a', model, builtins: false }).run('Hi')
+
     expect(model.calls[0]?.tools).toBeUndefined()
   })
 })
@@ -257,7 +261,9 @@ describe('events', () => {
       { text: 'done' },
     ])
 
-    await new Agent({ name: 'a', model, tools: [weather] }).run('go', {
+    // Without builtins, so the assertion below stays about *this* agent's tool
+    // rather than about which pure tools happen to ship.
+    await new Agent({ name: 'a', model, tools: [weather], builtins: false }).run('go', {
       onEvent: collected.listener,
     })
 

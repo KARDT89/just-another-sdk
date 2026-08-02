@@ -1,0 +1,338 @@
+---
+title: Built-in tools
+description: Useful tools that ship with the SDK, split by how much damage they could do.
+---
+
+`npm i just-another-sdk` should give you an agent that can already _do_ things,
+not a set of interfaces to implement. Seventeen tools ship in the box.
+
+They are split into tiers by **who chooses the host** — which turns out to be the
+line that matters, not "network or not":
+
+| Tier                                        | Configuration      | On by default |
+| ------------------------------------------- | ------------------ | ------------- |
+| [Pure](#automatic)                          | none               | **yes**       |
+| [Real data, no key](#real-data-with-no-key) | none               | no            |
+| [Arbitrary URLs](#arbitrary-urls)           | allowlist required | no            |
+| [Filesystem](#filesystem)                   | root required      | no            |
+
+<Callout type="warn">
+  Only the pure tier is automatic, and that is deliberate. A tool that can reach
+  the network or the disk must never appear on an agent nobody configured:
+  auto-enabling HTTP would ship an SSRF vector to every user of the SDK, and
+  auto-enabling the filesystem would let a prompt injection read `~/.ssh`.
+</Callout>
+
+## Automatic
+
+Five pure functions, on every agent, with nothing imported and nothing
+configured:
+
+```ts
+const agent = new Agent({ name: 'assistant', model })
+
+agent.toolNames
+// ['calculate', 'current_time', 'date_math', 'unit_convert', 'think']
+```
+
+| Tool           | What it does                                                   |
+| -------------- | -------------------------------------------------------------- |
+| `calculate`    | Arithmetic with `+ - * / % ^`, parentheses, and ~25 functions  |
+| `current_time` | The date and time now, in any IANA timezone                    |
+| `date_math`    | Shift a date, measure a gap, describe a date                   |
+| `unit_convert` | Length, mass, temperature, volume, speed, data, duration, area |
+| `think`        | A no-op scratchpad the model can use to plan mid-loop          |
+
+Each earns its place by being something models reliably get wrong on their own.
+They touch nothing — no network, no disk, no configuration — so there is nothing
+to lock down and no reason to make you ask.
+
+### `calculate` has no `eval` behind it
+
+The obvious three-line implementation of a calculator tool hands a language model
+a general-purpose code execution primitive, and the model does not have to be
+adversarial to reach it — a prompt injection in a fetched web page is enough.
+
+So `calculate` is a recursive-descent parser. `constructor.constructor("…")()`,
+`process.exit(1)`, and `require('fs')` are all parse errors, and a test asserts
+the module's own source contains neither `eval` nor `Function`.
+
+### What it costs
+
+The automatic tools are sent on **every request of every agent**. Measured:
+
+```text
+calculate      ~145 tokens
+current_time   ~105 tokens
+date_math      ~206 tokens
+unit_convert   ~161 tokens
+think          ~116 tokens
+─────────────────────────
+               ~732 tokens per request
+```
+
+A test pins that total, so the number here cannot drift from the code. It is a
+real cost on a high-volume text-only agent. Turn them off when you are not using
+them:
+
+```ts
+new Agent({ name: 'classifier', model, builtins: false })
+```
+
+### Overriding one
+
+A tool of your own with the same name **silently replaces** the built-in:
+
+```ts
+const agent = new Agent({
+  name: 'finance',
+  model,
+  tools: [myPreciseDecimalCalculator], // named 'calculate'
+})
+```
+
+No collision, no error. Without that rule, shipping a new built-in would break
+every existing agent that already had a tool of that name.
+
+## Real data, with no key
+
+```ts
+import { webTools } from 'just-another-sdk/tools'
+
+const agent = new Agent({ name: 'research', model, tools: [...webTools()] })
+```
+
+Four tools, no API key, no configuration:
+
+| Tool               | Source                |
+| ------------------ | --------------------- |
+| `get_weather`      | Open-Meteo            |
+| `geocode`          | Open-Meteo geocoding  |
+| `wikipedia`        | Wikipedia REST API    |
+| `currency_convert` | European Central Bank |
+
+Each hits **one fixed endpoint the model cannot change** — it supplies a query,
+never a host. That is why there is no allowlist to configure here: there is no
+SSRF surface to defend.
+
+`get_weather` takes a place name directly and geocodes it for you, because a
+model that has to call `geocode` first and thread coordinates through wastes a
+turn and often gets the latitude sign wrong:
+
+```ts
+// → { location: 'Paris, Île-de-France, France',
+//     current: { temperature: 18.2, conditions: 'clear sky', … },
+//     forecast: [ … ] }
+```
+
+<Callout type="info">
+  **Identify yourself if you are going to make real volume.** Wikipedia's API
+  policy requires a descriptive `User-Agent` and rate-limits anonymous callers
+  hard. The SDK sends one identifying itself, which is enough to work; replace it
+  with your own application and a contact URL for anything serious:
+
+```ts
+webTools({ userAgent: 'acme-support-bot (+https://acme.example/contact)' })
+```
+
+</Callout>
+
+These are opt-in rather than automatic because outbound network egress should
+always be a choice someone made on purpose. They also pin the SDK to third-party
+public APIs, which can change or rate-limit — so each takes a `baseUrl` and a
+`fetch` override, making them swappable and testable:
+
+```ts
+webTools({ baseUrl: 'https://my-open-meteo-mirror.internal', fetch: myFetch })
+```
+
+## Arbitrary URLs
+
+Here the model _does_ influence the host, so this is the tier that needs locking
+down.
+
+```ts
+import { httpFetch, readUrl } from 'just-another-sdk/tools'
+
+tools: [
+  httpFetch({
+    allow: ['api.example.com'],
+    headers: { authorization: `Bearer ${key}` },
+  }),
+  readUrl({ allow: ['*.wikipedia.org', 'docs.example.com'] }),
+]
+```
+
+`readUrl` is the one a research agent actually wants: it strips the markup and
+returns prose, rather than burning thousands of tokens on `<div>`s the model then
+has to ignore.
+
+### The allowlist is required
+
+There is no default. An unconfigured fetch tool is a `ConfigurationError` at
+construction, and an empty `allow` list reaches nothing and says so.
+
+`*.example.com` matches subdomains on a dot boundary, so `notexample.com` does
+not slip through. A bare `*` allows any host — and is still subject to everything
+below.
+
+### Refused even when the allowlist says `*`
+
+```text
+http://127.0.0.1/                        loopback
+http://localhost:8080/                   loopback by name
+http://[::1]/                            IPv6 loopback
+http://10.0.0.1/  http://192.168.1.1/    private ranges
+http://169.254.169.254/latest/meta-data/ cloud instance metadata
+http://metadata.google.internal/         cloud metadata by name
+http://[::ffff:127.0.0.1]/               IPv4-mapped loopback
+file:///etc/passwd                       non-http scheme
+https://user:pw@example.com/             embedded credentials
+```
+
+The allowlist is a statement about _intent_; this is about blast radius when the
+intent is wrong. `169.254.169.254` is the single most valuable SSRF target there
+is — it returns your cloud role's credentials.
+
+**Every redirect hop is re-checked.** An allowed host that `302`s to `127.0.0.1`
+is the oldest trick there is, and following it would make the allowlist
+decorative.
+
+<Callout type="warn">
+  **The limit of this, stated plainly.** These checks refuse dangerous
+  *literals*. They cannot catch `evil.com` that *resolves* to `169.254.169.254`,
+  because that needs DNS and `node:dns` does not exist on the edge runtimes this
+  package supports. Combined with the allowlist the gap is small — you have to
+  have allowed the attacker's hostname — but it is not a substitute for egress
+  rules on a host with secrets on its private network.
+</Callout>
+
+Responses are capped (1 MB by default) by **streaming and stopping**, not by
+buffering and then measuring.
+
+## Filesystem
+
+```ts
+import { fileTools } from 'just-another-sdk/tools/fs'
+
+tools: fileTools({ root: './workspace', write: true })
+```
+
+Read-only by default — `read_file`, `list_directory`, `search_files`. With
+`write: true` you also get `write_file` and `edit_file`.
+
+A separate entry point so a browser or edge bundle that imports
+`just-another-sdk/tools` never pulls in `node:fs`.
+
+### Containment
+
+`root` is required; there is deliberately no default, because an agent rooted at
+your home directory is one prompt injection away from reading your keys.
+
+Every path is resolved to a **real** path and then asserted to be inside the
+root. Normalising `..` away is not enough on its own: a symlink inside the root
+pointing at `/etc` normalises to an innocent-looking path and then reads `/etc`
+anyway. All of these are refused:
+
+```text
+../../etc/passwd                 traversal
+nested/../../secrets/id_rsa      traversal that normalises clean
+/absolute/path/outside           absolute path
+escape-hatch/id_rsa              a symlink pointing out of the root
+.env  .git  node_modules         sensitive names, even inside the root
+```
+
+An escape is a **tool result**, not a crash — the model reads it and works
+around it. The message never contains the absolute host path.
+
+### `edit_file` refuses ambiguity
+
+The old string must appear exactly once unless `replaceAll` is set. Silently
+editing the first of four matches is how an agent corrupts a file while
+reporting success.
+
+## Web search
+
+Search needs a vendor, and no vendor should become your dependency. So you pass
+the client, the same way [`redisSession(client)`](/docs/sessions) works:
+
+```ts
+import { webSearch, type SearchClient } from 'just-another-sdk/tools'
+
+const brave: SearchClient = {
+  async search({ query, limit, signal }) {
+    const response = await fetch(
+      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}`,
+      {
+        headers: { 'x-subscription-token': process.env.BRAVE_API_KEY! },
+        signal,
+      },
+    )
+    const data = await response.json()
+    return data.web.results.map((r) => ({
+      title: r.title,
+      url: r.url,
+      snippet: r.description,
+    }))
+  },
+}
+
+tools: [webSearch(brave)]
+```
+
+The SDK owns the schema, validation, result shape, and error handling; your
+client owns the one function that knows about your vendor.
+
+For search with **no** setup at all, `wikipedia()` above is keyless and covers a
+surprising amount of what agents actually look things up for.
+
+## Composing with guardrails
+
+Built-in tools are ordinary tools, so everything in
+[Guardrails](/docs/guardrails) applies — including to the automatic ones, by
+name:
+
+```ts
+new Agent({
+  name: 'support',
+  model,
+  tools: fileTools({ root: './workspace', write: true }),
+  toolGuardrails: [
+    {
+      name: 'confirm-writes',
+      tools: ['write_file'],
+      check: () => ({ requireApproval: true }),
+    },
+    {
+      name: 'no-maths',
+      tools: ['calculate'],
+      check: () => ({ reject: 'Use the pricing service.' }),
+    },
+  ],
+})
+```
+
+## What is deliberately missing
+
+There is no `run_command`. A coding agent wants shell, and leaving it out is a
+real gap — it is out because a mistake there is the only unrecoverable one, and
+an allowlist-based sandbox (argument escaping, environment scrubbing, cwd
+containment) deserves its own design rather than being the eighteenth item on a
+list.
+
+## Zero dependencies, still
+
+Nothing was added. The tools' input schemas are validated by a ~150-line internal
+[Standard Schema](https://standardschema.dev) implementation, because the SDK
+cannot import Zod to describe its own parameters — you still bring your own
+validator for your own tools, and the SDK depends on none.
+
+## Example
+
+[`examples/10-built-in-tools`](https://github.com/KARDT89/just-another-sdk/tree/main/examples/10-built-in-tools)
+runs all of it:
+
+```bash
+pnpm example:builtin-tools           # entirely offline
+pnpm example:builtin-tools -- --live # the keyless tier, against the real internet
+```

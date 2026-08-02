@@ -50,6 +50,32 @@ export interface AgentConfig<TOutput = string> {
   readonly tools?: readonly AnyTool[]
 
   /**
+   * Whether to include the built-in tools every agent gets. Default `true`.
+   *
+   * Five pure functions — `calculate`, `current_time`, `date_math`,
+   * `unit_convert`, and `think` — covering the things models most reliably get
+   * wrong on their own. They touch nothing: no network, no disk, no
+   * configuration, so there is nothing to lock down and no reason to make you
+   * ask for them.
+   *
+   * **A tool of your own with the same name silently replaces the built-in**, so
+   * this never collides with something you already wrote.
+   *
+   * Set `false` for a deliberately minimal tool surface — an agent under
+   * evaluation, or one whose prompt depends on seeing exactly one tool.
+   *
+   * The tools that *can* reach the outside world are deliberately not here.
+   * Import those from `just-another-sdk/tools` and configure them:
+   *
+   * ```ts
+   * import { webTools, httpFetch } from 'just-another-sdk/tools'
+   *
+   * new Agent({ name: 'research', model, tools: [...webTools()] })
+   * ```
+   */
+  readonly builtins?: boolean
+
+  /**
    * Specialists this agent can hand the conversation to.
    *
    * Each becomes a `transfer_to_<name>` tool the model may call. When it does,

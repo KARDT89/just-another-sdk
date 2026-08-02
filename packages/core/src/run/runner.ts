@@ -16,13 +16,7 @@ import {
 import { EventEmitter } from '../events/emitter.js'
 import { applyInputGuardrails, applyOutputGuardrails } from '../guardrails/apply.js'
 import type { ApprovalDecision } from '../guardrails/types.js'
-import {
-  briefing,
-  handoffTools,
-  refusalResult,
-  repairPairing,
-  resolveHandoffs,
-} from '../handoffs/handoff.js'
+import { briefing, refusalResult, repairPairing, resolveHandoffs } from '../handoffs/handoff.js'
 import type { HandoffRefusal, ResolvedHandoff } from '../handoffs/types.js'
 import { toolCallsOf, textOf } from '../providers/provider.js'
 import type {
@@ -44,6 +38,7 @@ import {
   type ToolGate,
 } from '../tools/execute.js'
 import { ToolRegistry } from '../tools/registry.js'
+import { resolveAgentTools } from '../tools/resolve.js'
 import {
   assistantMessage,
   messageText,
@@ -648,7 +643,7 @@ function createAgentResolver(options: RunOptions): AgentResolver {
       toolNames: (config.tools ?? []).map((t) => t.name),
     })
 
-    const registry = new ToolRegistry([...(config.tools ?? []), ...handoffTools(handoffs)])
+    const registry = new ToolRegistry(resolveAgentTools(config, handoffs))
 
     return {
       config,

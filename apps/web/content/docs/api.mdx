@@ -33,6 +33,31 @@ change in a patch release.
 | `ToolContext`                 | type     | Second argument to a handler: `runId`, `toolCallId`, `agentName`, `turn`, `signal` |
 | `ToolHandler`                 | type     | `(input, context) => output`                                                       |
 
+### Built-in tools
+
+`just-another-sdk/tools` — see [Built-in tools](/docs/built-in-tools).
+
+| Export                                                         | Kind       | Description                                                       |
+| -------------------------------------------------------------- | ---------- | ----------------------------------------------------------------- |
+| `webTools`                                                     | function   | All four keyless tools at once                                    |
+| `getWeather`, `geocode`, `wikipedia`, `currencyConvert`        | function   | Individually. No API key; fixed endpoints                         |
+| `httpFetch`, `readUrl`                                         | function   | Arbitrary URLs. `allow` list required                             |
+| `webSearch`                                                    | function   | `webSearch(client)` — you supply the vendor                       |
+| `extractText`                                                  | function   | The HTML → prose scrub `readUrl` uses                             |
+| `PURE_BUILTINS`                                                | const      | The five automatic tools, for composing with `builtins: false`    |
+| `calculate`, `currentTime`, `dateMath`, `unitConvert`, `think` | const      | The automatic tools individually                                  |
+| `UrlPolicy`, `BlockedUrlError`                                 | type/class | `{ allow, maxBytes?, maxRedirects?, methods?, headers?, fetch? }` |
+| `SearchClient`, `SearchQuery`, `SearchResult`                  | type       | The search interface you implement                                |
+| `WebToolOptions`                                               | type       | `{ baseUrl?, fetch?, timeoutMs?, userAgent? }`                    |
+
+`just-another-sdk/tools/fs` — a separate entry so `node:fs` stays out of edge bundles.
+
+| Export             | Kind     | Description                                                              |
+| ------------------ | -------- | ------------------------------------------------------------------------ |
+| `fileTools`        | function | `read_file`, `list_directory`, `search_files`, and with `write` two more |
+| `FileToolsOptions` | type     | `{ root, write?, maxReadBytes?, maxWriteBytes?, maxEntries? }`           |
+| `PathEscapeError`  | class    | Thrown when a path would leave the root                                  |
+
 ### Handoffs
 
 | Export           | Kind | Description                                                                    |

@@ -95,6 +95,7 @@ pnpm example:server     # a streaming chat backend with sessions and undo
 pnpm example:resumable  # a run that outlives a disconnected client
 pnpm example:guardrails # three places to refuse, one to ask a person — no key
 pnpm example:handoffs   # routing to specialists, loop prevention — no key
+pnpm example:builtin-tools # the built-in tool pack — no key
 ```
 
 ### Testing
@@ -117,8 +118,8 @@ pnpm --filter just-another-sdk test:coverage
 
 ## Roadmap
 
-Built-in tool pack · native Anthropic and Gemini providers · trace exporters for
-JSON and OpenTelemetry.
+Native Anthropic and Gemini providers · trace exporters for JSON and
+OpenTelemetry · a sandboxed `run_command`.
 
 Each is designed and documented under **Coming next** in the docs, so the intended
 API is visible before it ships.

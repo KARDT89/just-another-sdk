@@ -264,7 +264,13 @@ describe('repair', () => {
       { text: VALID },
     ])
 
-    await new Agent({ name: 'triage', model, tools: [lookup], outputSchema: Ticket }).run('x')
+    await new Agent({
+      name: 'triage',
+      model,
+      tools: [lookup],
+      outputSchema: Ticket,
+      builtins: false,
+    }).run('x')
 
     expect(model.calls[0]?.tools).toHaveLength(1)
     expect(model.calls[2]?.tools).toBeUndefined()

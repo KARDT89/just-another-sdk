@@ -15,7 +15,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { InstallTabs } from '@/components/install-tabs'
 import { Terminal, type TerminalLine } from '@/components/terminal'
-import { appName, links, packageName } from '@/lib/shared'
+import { appName, links, packageName, version } from '@/lib/shared'
 
 /**
  * The landing page.
@@ -139,8 +139,7 @@ export default function HomePage() {
           <div className="flex flex-col items-start gap-6">
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="outline" className="gap-1.5 font-mono text-xs">
-                <span className="size-1.5 rounded-full bg-term-green" />
-                v0.1.0
+                <span className="size-1.5 rounded-full bg-term-green" />v{version}
               </Badge>
               <Badge variant="outline" className="font-mono text-xs">
                 MIT

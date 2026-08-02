@@ -99,6 +99,26 @@
         "default": "./dist/streams/index.cjs"
       }
     },
+    "./tools": {
+      "import": {
+        "types": "./dist/tools/index.d.ts",
+        "default": "./dist/tools/index.js"
+      },
+      "require": {
+        "types": "./dist/tools/index.d.cts",
+        "default": "./dist/tools/index.cjs"
+      }
+    },
+    "./tools/fs": {
+      "import": {
+        "types": "./dist/tools/fs.d.ts",
+        "default": "./dist/tools/fs.js"
+      },
+      "require": {
+        "types": "./dist/tools/fs.d.cts",
+        "default": "./dist/tools/fs.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.cjs",
